@@ -8,12 +8,53 @@ import (
 	"log"
 	"net/http"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/gin-gonic/gin"
 )
 
 // Global database handle, initialized in main().
 var appDB *sql.DB
+
+// ─── Log Broadcasting ───────────────────────────────────────────────
+
+// LogEvent represents a structured log event for SSE streaming.
+type LogEvent struct {
+	Time    string         `json:"time"`
+	Type    string         `json:"type"`
+	Message string         `json:"message"`
+	Meta    map[string]any `json:"meta,omitempty"`
+}
+
+// logClients holds all active SSE client channels.
+var (
+	logClients   = make(map[chan LogEvent]struct{})
+	logClientsMu sync.RWMutex
+)
+
+// Broadcast sends a LogEvent to all connected SSE clients and logs to terminal.
+// Non-blocking: if a client's channel is full, the event is dropped for that client.
+func Broadcast(eventType, message string, meta map[string]any) {
+	log.Printf("[%s] %s", eventType, message)
+
+	evt := LogEvent{
+		Time:    time.Now().Format("15:04:05"),
+		Type:    eventType,
+		Message: message,
+		Meta:    meta,
+	}
+
+	logClientsMu.RLock()
+	defer logClientsMu.RUnlock()
+	for ch := range logClients {
+		select {
+		case ch <- evt:
+		default:
+			// Client channel full — drop event to avoid blocking.
+		}
+	}
+}
 
 func main() {
 	log.SetFlags(log.LstdFlags | log.Lshortfile)
@@ -45,12 +86,64 @@ func main() {
 		api.GET("/files", handleFiles)
 		api.GET("/rules", handleRules)
 		api.GET("/corrections", handleCorrections)
+		api.GET("/logs", handleLogs)
 	}
 	r.GET("/health", handleHealth)
 
 	log.Println("[main] NeuralFlow running on http://localhost:8080")
 	if err := r.Run(":8080"); err != nil {
 		log.Fatalf("[main] server failed: %v", err)
+	}
+}
+
+// ─── GET /api/logs (SSE Broadcast Stream) ───────────────────────────
+
+func handleLogs(c *gin.Context) {
+	// Set SSE headers.
+	c.Writer.Header().Set("Content-Type", "text/event-stream")
+	c.Writer.Header().Set("Cache-Control", "no-cache")
+	c.Writer.Header().Set("Connection", "keep-alive")
+	c.Writer.Header().Set("X-Accel-Buffering", "no")
+	c.Writer.WriteHeader(http.StatusOK)
+
+	flusher, _ := c.Writer.(http.Flusher)
+
+	// Register this client.
+	ch := make(chan LogEvent, 256)
+	logClientsMu.Lock()
+	logClients[ch] = struct{}{}
+	logClientsMu.Unlock()
+
+	// Unregister on disconnect.
+	defer func() {
+		logClientsMu.Lock()
+		delete(logClients, ch)
+		logClientsMu.Unlock()
+		close(ch)
+	}()
+
+	// Send initial heartbeat so client knows connection is live.
+	fmt.Fprintf(c.Writer, ": heartbeat\n\n")
+	if flusher != nil {
+		flusher.Flush()
+	}
+
+	// Stream events until client disconnects.
+	ctx := c.Request.Context()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case evt, ok := <-ch:
+			if !ok {
+				return
+			}
+			data, _ := json.Marshal(evt)
+			fmt.Fprintf(c.Writer, "event: log\ndata: %s\n\n", data)
+			if flusher != nil {
+				flusher.Flush()
+			}
+		}
 	}
 }
 
@@ -68,7 +161,7 @@ func handleUpload(c *gin.Context) {
 	defer file.Close()
 
 	filename := header.Filename
-	log.Printf("[upload] received file: %s (%d bytes)", filename, header.Size)
+	Broadcast("info", fmt.Sprintf("Upload started: %s (%d bytes)", filename, header.Size), nil)
 
 	// Validate file extension.
 	allowed := []string{".php", ".json", ".txt", ".csv", ".go", ".js", ".py"}
@@ -100,12 +193,16 @@ func handleUpload(c *gin.Context) {
 	// Run the upload pipeline (verbalization + QA generation).
 	result, err := ProcessUpload(appDB, string(content), filename)
 	if err != nil {
+		Broadcast("error", fmt.Sprintf("Upload failed: %v", err), nil)
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"status": 500, "data": nil,
 			"error": "upload processing failed: " + err.Error(),
 		})
 		return
 	}
+
+	Broadcast("ok", fmt.Sprintf("Upload complete: %d functions, %d QA pairs, %d rules",
+		result.Chunks, result.QAPairs, result.Rules), nil)
 
 	c.JSON(http.StatusOK, gin.H{
 		"status": 200,

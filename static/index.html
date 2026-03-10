@@ -805,6 +805,209 @@
             }
         }
 
+        /* ── Console Tab ───────────────────────────────────── */
+        .console-tab-body {
+            display: flex;
+            flex-direction: column;
+            height: 100%;
+            font-family: 'IBM Plex Mono', monospace;
+            font-size: 10px;
+        }
+
+        .console-header {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            padding: 8px 10px;
+            border-bottom: 1px solid var(--border);
+            flex-shrink: 0;
+        }
+
+        .console-header .console-dot {
+            width: 7px;
+            height: 7px;
+            background: var(--green);
+            border-radius: 50%;
+        }
+
+        .console-header .console-label {
+            font-weight: 600;
+            font-size: 11px;
+            color: var(--text);
+            flex: 1;
+        }
+
+        .console-header button {
+            background: none;
+            border: 1px solid var(--border);
+            border-radius: 4px;
+            padding: 2px 8px;
+            font-family: var(--font);
+            font-size: 9px;
+            color: var(--text-muted);
+            cursor: pointer;
+            transition: var(--transition);
+        }
+
+        .console-header button:hover {
+            background: var(--bg-input);
+            color: var(--text);
+        }
+
+        .console-header button.active {
+            background: var(--coral);
+            color: #fff;
+            border-color: var(--coral);
+        }
+
+        .console-lines {
+            flex: 1;
+            overflow-y: auto;
+            padding: 6px 10px;
+            position: relative;
+        }
+
+        .clog-line {
+            display: flex;
+            gap: 6px;
+            padding: 3px 0;
+            line-height: 1.5;
+            animation: fadeSlideIn 0.25s ease-out both;
+        }
+
+        .clog-time {
+            color: #b8b0a6;
+            flex-shrink: 0;
+            font-size: 9px;
+            min-width: 52px;
+        }
+
+        .clog-icon {
+            flex-shrink: 0;
+            width: 12px;
+            text-align: center;
+        }
+
+        .clog-msg {
+            flex: 1;
+            word-break: break-word;
+        }
+
+        .clog-line[data-type="info"] .clog-icon {
+            color: #8c857c;
+        }
+
+        .clog-line[data-type="ok"] .clog-icon {
+            color: #3a7a52;
+        }
+
+        .clog-line[data-type="ok"] .clog-msg {
+            color: #3a7a52;
+        }
+
+        .clog-line[data-type="warn"] .clog-icon {
+            color: #b07d16;
+        }
+
+        .clog-line[data-type="warn"] .clog-msg {
+            color: #b07d16;
+        }
+
+        .clog-line[data-type="error"] .clog-icon {
+            color: #c0420f;
+        }
+
+        .clog-line[data-type="error"] .clog-msg {
+            color: #c0420f;
+        }
+
+        .clog-line[data-type="data"] .clog-icon {
+            color: #2457a4;
+        }
+
+        .clog-line[data-type="data"] .clog-msg {
+            color: #2457a4;
+        }
+
+        .clog-line[data-type="progress"] .clog-icon {
+            color: #d94f2a;
+        }
+
+        .clog-line[data-type="progress"] .clog-msg {
+            color: #d94f2a;
+            font-weight: 500;
+        }
+
+        .clog-progress {
+            margin-top: 2px;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            padding-left: 70px;
+        }
+
+        .clog-progress-track {
+            flex: 1;
+            height: 3px;
+            background: var(--border);
+            border-radius: 2px;
+            overflow: hidden;
+        }
+
+        .clog-progress-fill {
+            height: 100%;
+            background: var(--coral);
+            border-radius: 2px;
+            transition: width 0.4s ease;
+        }
+
+        .clog-progress-pct {
+            font-size: 9px;
+            color: var(--text-muted);
+            min-width: 28px;
+            text-align: right;
+        }
+
+        .tab-btn {
+            position: relative;
+        }
+
+        .console-badge {
+            position: absolute;
+            top: -4px;
+            right: -6px;
+            background: #c0420f;
+            color: #fff;
+            font-size: 9px;
+            border-radius: 10px;
+            padding: 1px 5px;
+            line-height: 1.2;
+            min-width: 14px;
+            text-align: center;
+        }
+
+        .console-newlogs {
+            position: sticky;
+            bottom: 8px;
+            left: 50%;
+            transform: translateX(-50%);
+            background: var(--coral);
+            color: #fff;
+            font-size: 9px;
+            font-family: var(--font);
+            border-radius: 12px;
+            padding: 4px 12px;
+            cursor: pointer;
+            border: none;
+            box-shadow: var(--shadow-md);
+            display: none;
+            z-index: 5;
+        }
+
+        .console-newlogs:hover {
+            background: var(--coral-dark);
+        }
+
         /* ── Scrollbar ─────────────────────────────────────── */
         ::-webkit-scrollbar {
             width: 6px;
@@ -890,6 +1093,7 @@
                 <div class="tab-bar">
                     <button class="tab-btn active" data-tab="rules">Rules</button>
                     <button class="tab-btn" data-tab="corrections">Corrections</button>
+                    <button class="tab-btn" data-tab="console" id="consoleTabBtn">Console</button>
                 </div>
                 <div class="tab-content">
                     <div id="rulesTab" class="tab-pane active">
@@ -897,6 +1101,18 @@
                     </div>
                     <div id="correctionsTab" class="tab-pane">
                         <div class="empty-tab">Select a file to view corrections</div>
+                    </div>
+                    <div id="consoleTab" class="tab-pane">
+                        <div class="console-tab-body">
+                            <div class="console-header">
+                                <div class="console-dot" id="consoleDot"></div>
+                                <span class="console-label">Console</span>
+                                <button id="consoleClearBtn">Clear</button>
+                                <button id="consoleScrollBtn" class="active" title="Auto-scroll">↓</button>
+                            </div>
+                            <div class="console-lines" id="consoleLines"></div>
+                            <button class="console-newlogs" id="consoleNewLogsBtn">↓ New logs</button>
+                        </div>
                     </div>
                 </div>
             </aside>
@@ -1325,8 +1541,184 @@
                 btn.classList.add('active');
                 $$('.tab-pane').forEach(p => p.classList.remove('active'));
                 $(`#${btn.dataset.tab}Tab`).classList.add('active');
+
+                // Reset console unread badge when switching to Console tab.
+                if (btn.dataset.tab === 'console') {
+                    consoleUnread = 0;
+                    updateConsoleBadge();
+                }
             });
         });
+
+        // ─── Console SSE ─────────────────────────────────────────
+        const consoleEl = $('#consoleLines');
+        const consoleDot = $('#consoleDot');
+        const consoleScrollBtn = $('#consoleScrollBtn');
+        const consoleNewLogsBtn = $('#consoleNewLogsBtn');
+        const consoleTabBtn = $('#consoleTabBtn');
+
+        let consoleAutoScroll = true;
+        let consoleUnread = 0;
+        let consoleLineCount = 0;
+        const CONSOLE_MAX_LINES = 500;
+
+        const LOG_ICONS = {
+            info: '→',
+            ok: '✓',
+            warn: '⚠',
+            error: '✕',
+            data: '✦',
+            progress: '◈',
+        };
+
+        // ── Autoscroll toggle ──
+        consoleScrollBtn.addEventListener('click', () => {
+            consoleAutoScroll = !consoleAutoScroll;
+            consoleScrollBtn.classList.toggle('active', consoleAutoScroll);
+            if (consoleAutoScroll) {
+                consoleEl.scrollTop = consoleEl.scrollHeight;
+                consoleNewLogsBtn.style.display = 'none';
+            }
+        });
+
+        // Detect manual scroll-up → disable autoscroll.
+        consoleEl.addEventListener('scroll', () => {
+            const atBottom = consoleEl.scrollHeight - consoleEl.scrollTop - consoleEl.clientHeight < 30;
+            if (!atBottom && consoleAutoScroll) {
+                consoleAutoScroll = false;
+                consoleScrollBtn.classList.remove('active');
+            }
+            if (atBottom) {
+                consoleNewLogsBtn.style.display = 'none';
+            }
+        });
+
+        // ── New logs sticky button ──
+        consoleNewLogsBtn.addEventListener('click', () => {
+            consoleAutoScroll = true;
+            consoleScrollBtn.classList.add('active');
+            consoleEl.scrollTop = consoleEl.scrollHeight;
+            consoleNewLogsBtn.style.display = 'none';
+        });
+
+        // ── Clear button ──
+        $('#consoleClearBtn').addEventListener('click', () => {
+            consoleEl.innerHTML = '';
+            consoleLineCount = 0;
+        });
+
+        // ── Unread badge ──
+        function updateConsoleBadge() {
+            let badge = consoleTabBtn.querySelector('.console-badge');
+            if (consoleUnread > 0) {
+                if (!badge) {
+                    badge = document.createElement('span');
+                    badge.className = 'console-badge';
+                    consoleTabBtn.appendChild(badge);
+                }
+                badge.textContent = consoleUnread > 99 ? '99+' : consoleUnread;
+            } else if (badge) {
+                badge.remove();
+            }
+        }
+
+        function isConsoleActive() {
+            return consoleTabBtn.classList.contains('active');
+        }
+
+        // ── Append a log line ──
+        function appendLogLine(entry) {
+            const type = entry.type || 'info';
+            const icon = LOG_ICONS[type] || '→';
+            const time = entry.time || '';
+            const msg = entry.message || '';
+
+            const lineEl = document.createElement('div');
+            lineEl.className = 'clog-line';
+            lineEl.setAttribute('data-type', type);
+            lineEl.innerHTML = `
+                <span class="clog-time">${escapeHtml(time)}</span>
+                <span class="clog-icon">${icon}</span>
+                <span class="clog-msg">${escapeHtml(msg)}</span>
+            `;
+            consoleEl.appendChild(lineEl);
+
+            // Progress bar for progress events.
+            if (type === 'progress' && entry.meta && entry.meta.total > 0) {
+                const pct = Math.round((entry.meta.current / entry.meta.total) * 100);
+                const progEl = document.createElement('div');
+                progEl.className = 'clog-progress';
+                progEl.innerHTML = `
+                    <div class="clog-progress-track">
+                        <div class="clog-progress-fill" style="width:${pct}%"></div>
+                    </div>
+                    <span class="clog-progress-pct">${pct}%</span>
+                `;
+                consoleEl.appendChild(progEl);
+            }
+
+            consoleLineCount++;
+
+            // Prune old lines.
+            while (consoleLineCount > CONSOLE_MAX_LINES) {
+                const first = consoleEl.firstElementChild;
+                if (first) {
+                    // If next sibling is a progress bar, remove that too.
+                    if (first.nextElementSibling && first.nextElementSibling.classList.contains('clog-progress')) {
+                        first.nextElementSibling.remove();
+                    }
+                    first.remove();
+                    consoleLineCount--;
+                } else break;
+            }
+
+            // Autoscroll.
+            if (consoleAutoScroll) {
+                consoleEl.scrollTop = consoleEl.scrollHeight;
+            } else {
+                consoleNewLogsBtn.style.display = 'block';
+            }
+
+            // Unread badge.
+            if (!isConsoleActive()) {
+                consoleUnread++;
+                updateConsoleBadge();
+            }
+        }
+
+        // ── SSE Connection ──
+        let sseRetries = 0;
+        const SSE_MAX_RETRIES = 5;
+
+        function connectLogSSE() {
+            const evtSource = new EventSource('/api/logs');
+
+            evtSource.onopen = () => {
+                sseRetries = 0;
+                consoleDot.style.background = 'var(--green)';
+                appendLogLine({ time: new Date().toLocaleTimeString('en-GB', { hour12: false }).slice(0, 8), type: 'ok', message: 'Connected to server log stream' });
+            };
+
+            evtSource.addEventListener('log', (e) => {
+                try {
+                    const entry = JSON.parse(e.data);
+                    appendLogLine(entry);
+                } catch { /* ignore */ }
+            });
+
+            evtSource.onerror = () => {
+                evtSource.close();
+                consoleDot.style.background = '#c0420f';
+                sseRetries++;
+
+                if (sseRetries <= SSE_MAX_RETRIES) {
+                    appendLogLine({ time: new Date().toLocaleTimeString('en-GB', { hour12: false }).slice(0, 8), type: 'error', message: `Log stream disconnected — reconnecting (${sseRetries}/${SSE_MAX_RETRIES})...` });
+                    setTimeout(connectLogSSE, 3000);
+                } else {
+                    appendLogLine({ time: new Date().toLocaleTimeString('en-GB', { hour12: false }).slice(0, 8), type: 'error', message: 'Log stream unavailable' });
+                }
+            };
+        }
 
         // ─── Utilities ──────────────────────────────────────────
         function escapeHtml(str) {
@@ -1363,6 +1755,7 @@
             await checkHealth();
             await loadFiles();
             setInterval(checkHealth, 30000);
+            connectLogSSE();
         })();
     </script>
 </body>

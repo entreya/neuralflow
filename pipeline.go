@@ -105,7 +105,7 @@ func parsePHPFunctions(source string) []PHPFunction {
 func ProcessUpload(db *sql.DB, fileContent, filename string) (*UploadResult, error) {
 	// Clear previous data for this file.
 	if err := DeleteFileData(db, filename); err != nil {
-		log.Printf("[upload] warning: failed to clear old data for %s: %v", filename, err)
+		Broadcast("warn", fmt.Sprintf("Failed to clear old data for %s: %v", filename, err), nil)
 	}
 
 	// Step 1 — Parse PHP into functions (or fall back to fixed chunks).
@@ -113,8 +113,10 @@ func ProcessUpload(db *sql.DB, fileContent, filename string) (*UploadResult, err
 
 	var chunks []string
 	if len(functions) == 0 {
-		log.Printf("[upload] no PHP functions found, falling back to fixed 512-char chunks")
+		Broadcast("info", "No PHP functions found, falling back to fixed 512-char chunks", nil)
 		chunks = chunkContentFixed(fileContent, 512)
+	} else {
+		Broadcast("info", fmt.Sprintf("Parsing PHP... found %d functions", len(functions)), nil)
 	}
 
 	totalQAPairs := 0
@@ -122,37 +124,45 @@ func ProcessUpload(db *sql.DB, fileContent, filename string) (*UploadResult, err
 	if len(functions) > 0 {
 		// Step 2 — Process each function through the verbalization pipeline.
 		for i, fn := range functions {
-			log.Printf("[upload] processing function %d/%d: %s", i+1, len(functions), fn.Name)
+			Broadcast("progress", fmt.Sprintf("%s()", fn.Name), map[string]any{
+				"current": i + 1,
+				"total":   len(functions),
+			})
 
 			// 2a. Save the raw function body as a chunk.
 			chunkID, err := InsertChunkReturningID(db, filename, i, fn.Body, nil)
 			if err != nil {
-				log.Printf("[upload] error: insert chunk for %s: %v", fn.Name, err)
+				Broadcast("error", fmt.Sprintf("Insert chunk failed for %s: %v", fn.Name, err), nil)
 				continue
 			}
 
 			// 2b. Verbalize the function.
+			Broadcast("info", fmt.Sprintf("Verbalizing %s()...", fn.Name), nil)
 			verbalization, err := Verbalize(fn.Body)
 			if err != nil {
-				log.Printf("[upload] warning: verbalize failed for %s: %v, using raw body", fn.Name, err)
+				Broadcast("warn", fmt.Sprintf("Verbalize failed for %s, using raw body", fn.Name), nil)
 				verbalization = fn.Body // Fallback to raw body.
 			}
 
 			// 2c. Embed the verbalization and save it.
 			verbEmb, err := Embed(verbalization)
 			if err != nil {
-				log.Printf("[upload] warning: embed verbalization failed for %s: %v", fn.Name, err)
+				Broadcast("warn", fmt.Sprintf("Embed verbalization failed for %s: %v", fn.Name, err), nil)
 			}
 			if err := SaveVerbalization(db, chunkID, verbalization, verbEmb); err != nil {
-				log.Printf("[upload] warning: save verbalization failed for %s: %v", fn.Name, err)
+				Broadcast("error", fmt.Sprintf("Save verbalization failed for %s: %v", fn.Name, err), nil)
+			} else {
+				Broadcast("ok", fmt.Sprintf("Verbalized %s()", fn.Name), nil)
 			}
 
 			// 2d. Generate Q&A pairs from the verbalization.
+			Broadcast("info", fmt.Sprintf("Generating QA for %s()...", fn.Name), nil)
 			qaPairs, err := GenerateQA(verbalization)
 			if err != nil {
-				log.Printf("[upload] warning: GenerateQA failed for %s: %v", fn.Name, err)
+				Broadcast("warn", fmt.Sprintf("GenerateQA failed for %s: %v", fn.Name, err), nil)
 				qaPairs = nil
 			}
+			fnQACount := 0
 			for _, pair := range qaPairs {
 				qEmb, embErr := Embed(pair.Question)
 				if embErr != nil {
@@ -163,30 +173,32 @@ func ProcessUpload(db *sql.DB, fileContent, filename string) (*UploadResult, err
 					log.Printf("[upload] warning: save QA pair failed: %v", saveErr)
 				} else {
 					totalQAPairs++
+					fnQACount++
 				}
 			}
 
-			log.Printf("[upload] processed function: %s → %d QA pairs", fn.Name, len(qaPairs))
+			Broadcast("data", fmt.Sprintf("%d QA pairs saved for %s()", fnQACount, fn.Name), nil)
 		}
 	} else {
 		// Fallback path: embed fixed chunks without verbalization.
 		for i, chunk := range chunks {
 			embedding, err := Embed(chunk)
 			if err != nil {
-				log.Printf("[upload] warning: embed failed for chunk %d: %v", i, err)
+				Broadcast("warn", fmt.Sprintf("Embed failed for chunk %d: %v", i, err), nil)
 				embedding = nil
 			}
 			if err := InsertChunk(db, filename, i, chunk, embedding); err != nil {
-				log.Printf("[upload] error: insert chunk %d: %v", i, err)
+				Broadcast("error", fmt.Sprintf("Insert chunk %d failed: %v", i, err), nil)
 			}
 		}
 	}
 
 	// Step 3 — Extract rules via LLM (unchanged from original).
+	Broadcast("info", "Extracting validation rules...", nil)
 	rulesCount := 0
 	extractedRules, err := extractRules(fileContent)
 	if err != nil {
-		log.Printf("[upload] warning: rule extraction failed: %v", err)
+		Broadcast("warn", fmt.Sprintf("Rule extraction failed: %v", err), nil)
 	} else {
 		for _, rule := range extractedRules {
 			if err := InsertRule(db, filename, rule); err != nil {
@@ -195,6 +207,7 @@ func ProcessUpload(db *sql.DB, fileContent, filename string) (*UploadResult, err
 				rulesCount++
 			}
 		}
+		Broadcast("data", fmt.Sprintf("%d rules extracted", rulesCount), nil)
 	}
 
 	chunkCount := len(functions)
@@ -202,8 +215,12 @@ func ProcessUpload(db *sql.DB, fileContent, filename string) (*UploadResult, err
 		chunkCount = len(chunks)
 	}
 
-	log.Printf("[upload] done: %d chunks, %d QA pairs, %d rules for %s",
-		chunkCount, totalQAPairs, rulesCount, filename)
+	Broadcast("ok", fmt.Sprintf("Upload complete: %d functions, %d QA pairs, %d rules",
+		chunkCount, totalQAPairs, rulesCount), map[string]any{
+		"chunks":   chunkCount,
+		"qa_pairs": totalQAPairs,
+		"rules":    rulesCount,
+	})
 
 	return &UploadResult{
 		Chunks:   chunkCount,
@@ -272,6 +289,7 @@ func RunPipeline(db *sql.DB, filename, query string, sse SSEWriter) (*PipelineRe
 
 	// 1. Embed the query.
 	emit("Embedding query with nomic-embed-text...")
+	Broadcast("info", "Embedding query...", nil)
 	queryEmbedding, err := Embed(query)
 	if err != nil {
 		return nil, fmt.Errorf("embed query: %w", err)
@@ -285,6 +303,7 @@ func RunPipeline(db *sql.DB, filename, query string, sse SSEWriter) (*PipelineRe
 		return nil, fmt.Errorf("query similar: %w", err)
 	}
 	emit(fmt.Sprintf("Found %d relevant functions", len(chunks)))
+	Broadcast("data", fmt.Sprintf("Retrieved %d relevant functions", len(chunks)), nil)
 
 	if len(chunks) == 0 {
 		return nil, fmt.Errorf("no chunks found for file '%s'", filename)
@@ -298,6 +317,7 @@ func RunPipeline(db *sql.DB, filename, query string, sse SSEWriter) (*PipelineRe
 		qaPairs = nil
 	}
 	emit(fmt.Sprintf("Found %d relevant Q&A examples", len(qaPairs)))
+	Broadcast("data", fmt.Sprintf("Retrieved %d QA examples", len(qaPairs)), nil)
 
 	// 4. Load rules for this file.
 	rules, err := GetRules(db, filename)
@@ -335,12 +355,14 @@ func RunPipeline(db *sql.DB, filename, query string, sse SSEWriter) (*PipelineRe
 	for retries = 0; retries < maxRetries; retries++ {
 		if retries > 0 {
 			emit(fmt.Sprintf("Retry %d/%d — injecting correction...", retries, maxRetries))
+			Broadcast("warn", fmt.Sprintf("Score %.2f below threshold — retry %d/%d", lastResult.Score, retries, maxRetries), nil)
 		}
 
 		// Build the prompt.
 		prompt := buildPrompt(contextStr, rulesSummary, query, correctionText)
 
 		emit("Calling llama3...")
+		Broadcast("info", "Calling llama3...", nil)
 
 		// Stream tokens via SSE if available, else use regular Chat.
 		var response string
@@ -367,6 +389,7 @@ func RunPipeline(db *sql.DB, filename, query string, sse SSEWriter) (*PipelineRe
 
 		if lastResult.Passed {
 			emit("✓ Output passed evaluation!")
+			Broadcast("ok", fmt.Sprintf("Score: %.2f — passed", lastResult.Score), nil)
 			break
 		}
 
@@ -404,6 +427,9 @@ func RunPipeline(db *sql.DB, filename, query string, sse SSEWriter) (*PipelineRe
 	status := "passed"
 	if !lastResult.Passed {
 		status = "failed"
+		Broadcast("warn", "Max retries reached — showing best result", nil)
+	} else {
+		Broadcast("ok", "Output ready ✓", nil)
 	}
 	outputJSON, _ := json.Marshal(parsedOutput)
 	if updateErr := UpdateRun(db, runID, status, lastResult.Score, retries, string(outputJSON)); updateErr != nil {

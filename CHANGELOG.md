@@ -29,3 +29,7 @@ All notable changes to **NeuralFlow** will be documented in this file.
 - [FEAT] Verbalization-based similarity search (falls back to raw embeddings)
 - [FEAT] `ProcessUpload()` — centralized upload flow with per-function progress logging
 - [PERF] Enriched RAG context: code chunks + QA examples + corrections in prompt
+- [FEAT] Console tab in right panel with real-time SSE log streaming via `/api/logs`
+- [FEAT] `Broadcast()` function — fan-out log events to all connected SSE clients
+- [FEAT] Color-coded log lines (info/ok/warn/error/data/progress) with mini progress bars
+- [FEAT] Unread badge on Console tab, autoscroll toggle, 500-line pruning, re-connect with retry
