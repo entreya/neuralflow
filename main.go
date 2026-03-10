@@ -96,103 +96,22 @@ func handleUpload(c *gin.Context) {
 		})
 		return
 	}
-	fileContent := string(content)
 
-	// Clear previous data for this file (re-upload support).
-	if err := DeleteFileData(appDB, filename); err != nil {
-		log.Printf("[upload] warning: failed to clear old data for %s: %v", filename, err)
-	}
-
-	// ── Step 1: Chunk the file ──────────────────────────────────
-	chunks := chunkContent(fileContent, 512)
-	log.Printf("[upload] split into %d chunks", len(chunks))
-
-	// ── Step 2: Embed and store each chunk ──────────────────────
-	for i, chunk := range chunks {
-		embedding, err := Embed(chunk)
-		if err != nil {
-			log.Printf("[upload] warning: embed failed for chunk %d: %v", i, err)
-			// Store without embedding.
-			if err := InsertChunk(appDB, filename, i, chunk, nil); err != nil {
-				log.Printf("[upload] error: insert chunk %d: %v", i, err)
-			}
-			continue
-		}
-		if err := InsertChunk(appDB, filename, i, chunk, embedding); err != nil {
-			log.Printf("[upload] error: insert chunk %d: %v", i, err)
-		}
-	}
-
-	// ── Step 3: Extract rules via LLM ───────────────────────────
-	rulesCount := 0
-	extractedRules, err := extractRules(fileContent)
+	// Run the upload pipeline (verbalization + QA generation).
+	result, err := ProcessUpload(appDB, string(content), filename)
 	if err != nil {
-		log.Printf("[upload] warning: rule extraction failed: %v", err)
-	} else {
-		for _, rule := range extractedRules {
-			if err := InsertRule(appDB, filename, rule); err != nil {
-				log.Printf("[upload] warning: insert rule failed: %v", err)
-			} else {
-				rulesCount++
-			}
-		}
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"status": 500, "data": nil,
+			"error": "upload processing failed: " + err.Error(),
+		})
+		return
 	}
-
-	log.Printf("[upload] done: %d chunks, %d rules for %s", len(chunks), rulesCount, filename)
 
 	c.JSON(http.StatusOK, gin.H{
 		"status": 200,
-		"data": gin.H{
-			"chunks":   len(chunks),
-			"rules":    rulesCount,
-			"filename": filename,
-		},
-		"error": nil,
+		"data":   result,
+		"error":  nil,
 	})
-}
-
-// chunkContent splits content into ~maxSize char chunks on function/class boundaries.
-func chunkContent(content string, maxSize int) []string {
-	lines := strings.Split(content, "\n")
-	chunks := make([]string, 0, len(lines)/10+1)
-	var current strings.Builder
-
-	// Boundary markers for common languages.
-	boundaries := []string{"function ", "func ", "class ", "public ", "private ", "protected ", "def ", "module "}
-
-	for _, line := range lines {
-		// Check if this line starts a new logical block and current chunk is large enough.
-		if current.Len() > maxSize/2 {
-			trimmedLine := strings.TrimSpace(line)
-			isBoundary := false
-			for _, b := range boundaries {
-				if strings.HasPrefix(trimmedLine, b) {
-					isBoundary = true
-					break
-				}
-			}
-			if isBoundary && current.Len() > 0 {
-				chunks = append(chunks, current.String())
-				current.Reset()
-			}
-		}
-
-		current.WriteString(line)
-		current.WriteString("\n")
-
-		// Hard split if chunk gets too large.
-		if current.Len() >= maxSize {
-			chunks = append(chunks, current.String())
-			current.Reset()
-		}
-	}
-
-	// Don't forget the last chunk.
-	if current.Len() > 0 {
-		chunks = append(chunks, current.String())
-	}
-
-	return chunks
 }
 
 // extractRules calls llama3 to extract validation rules from file content.
@@ -232,13 +151,11 @@ Code:
 
 	// Handle the case where the LLM returns a JSON array inside markdown.
 	if !strings.HasPrefix(trimmed, "[") {
-		// Try to find the array start.
 		idx := strings.Index(trimmed, "[")
 		if idx >= 0 {
 			trimmed = trimmed[idx:]
 		}
 	}
-	// Find the array end.
 	if lastIdx := strings.LastIndex(trimmed, "]"); lastIdx >= 0 {
 		trimmed = trimmed[:lastIdx+1]
 	}
@@ -251,11 +168,38 @@ Code:
 	return rules, nil
 }
 
-// ─── POST /api/run ──────────────────────────────────────────────────
+// ─── POST /api/run (SSE Streaming) ──────────────────────────────────
 
 type runRequest struct {
 	Filename string `json:"filename" binding:"required"`
 	Query    string `json:"query" binding:"required"`
+}
+
+// ginSSEWriter implements SSEWriter using Gin's response writer.
+type ginSSEWriter struct {
+	w       http.ResponseWriter
+	flusher http.Flusher
+}
+
+func (g *ginSSEWriter) SendLog(msg string) {
+	data, _ := json.Marshal(msg)
+	fmt.Fprintf(g.w, "event: log\ndata: %s\n\n", data)
+}
+
+func (g *ginSSEWriter) SendToken(token string) {
+	data, _ := json.Marshal(token)
+	fmt.Fprintf(g.w, "event: token\ndata: %s\n\n", data)
+}
+
+func (g *ginSSEWriter) SendResult(result *PipelineResult) {
+	data, _ := json.Marshal(result)
+	fmt.Fprintf(g.w, "event: result\ndata: %s\n\n", data)
+}
+
+func (g *ginSSEWriter) Flush() {
+	if g.flusher != nil {
+		g.flusher.Flush()
+	}
 }
 
 func handleRun(c *gin.Context) {
@@ -270,20 +214,32 @@ func handleRun(c *gin.Context) {
 
 	log.Printf("[run] query='%s' file='%s'", req.Query, req.Filename)
 
-	result, err := RunPipeline(appDB, req.Filename, req.Query)
+	// Set SSE headers.
+	c.Writer.Header().Set("Content-Type", "text/event-stream")
+	c.Writer.Header().Set("Cache-Control", "no-cache")
+	c.Writer.Header().Set("Connection", "keep-alive")
+	c.Writer.Header().Set("X-Accel-Buffering", "no")
+	c.Writer.WriteHeader(http.StatusOK)
+
+	flusher, _ := c.Writer.(http.Flusher)
+	sse := &ginSSEWriter{w: c.Writer, flusher: flusher}
+
+	_, err := RunPipeline(appDB, req.Filename, req.Query, sse)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"status": 500, "data": nil,
-			"error": "pipeline failed: " + err.Error(),
-		})
+		// Send error as an SSE event.
+		errData, _ := json.Marshal(err.Error())
+		fmt.Fprintf(c.Writer, "event: error\ndata: %s\n\n", errData)
+		if flusher != nil {
+			flusher.Flush()
+		}
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{
-		"status": 200,
-		"data":   result,
-		"error":  nil,
-	})
+	// Signal completion.
+	fmt.Fprintf(c.Writer, "event: done\ndata: {}\n\n")
+	if flusher != nil {
+		flusher.Flush()
+	}
 }
 
 // ─── GET /api/files ─────────────────────────────────────────────────

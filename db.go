@@ -54,7 +54,7 @@ func InitDB() (*sql.DB, error) {
 	return db, nil
 }
 
-// ensureSchema checks if tables exist and runs schema.sql if not.
+// ensureSchema checks if tables exist, runs schema.sql if needed, then runs migrations.
 func ensureSchema(db *sql.DB) error {
 	var count int
 	err := db.QueryRow(`
@@ -65,19 +65,58 @@ func ensureSchema(db *sql.DB) error {
 	if err != nil {
 		return err
 	}
-	if count >= 4 {
-		return nil // All tables exist.
+	if count < 4 {
+		schemaSQL, err := os.ReadFile("schema.sql")
+		if err != nil {
+			return fmt.Errorf("read schema.sql: %w", err)
+		}
+		if _, err = db.Exec(string(schemaSQL)); err != nil {
+			return fmt.Errorf("exec schema.sql: %w", err)
+		}
+		log.Println("[db] schema initialized from schema.sql")
 	}
 
-	schemaSQL, err := os.ReadFile("schema.sql")
-	if err != nil {
-		return fmt.Errorf("read schema.sql: %w", err)
+	// Run migrations for existing databases (MySQL 8.0 compatible).
+	addColumnIfNotExists(db, "chunks", "verbalization", "TEXT")
+	addColumnIfNotExists(db, "chunks", "verbalization_embedding", "JSON")
+
+	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS qa_pairs (
+		id            INT AUTO_INCREMENT PRIMARY KEY,
+		filename      VARCHAR(255) NOT NULL,
+		function_name VARCHAR(255),
+		question      TEXT,
+		answer_json   JSON,
+		embedding     JSON,
+		created_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+		INDEX idx_qa_filename (filename)
+	) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`); err != nil {
+		log.Printf("[db] migration warning (qa_pairs): %v", err)
 	}
-	if _, err = db.Exec(string(schemaSQL)); err != nil {
-		return fmt.Errorf("exec schema.sql: %w", err)
-	}
-	log.Println("[db] schema initialized from schema.sql")
+
 	return nil
+}
+
+// addColumnIfNotExists checks information_schema before running ALTER TABLE.
+// MySQL 8.0 does not support ADD COLUMN IF NOT EXISTS (MariaDB-only).
+func addColumnIfNotExists(db *sql.DB, table, column, colType string) {
+	var count int
+	err := db.QueryRow(`
+		SELECT COUNT(*) FROM information_schema.columns
+		WHERE table_schema = DATABASE() AND table_name = ? AND column_name = ?
+	`, table, column).Scan(&count)
+	if err != nil {
+		log.Printf("[db] migration check error (%s.%s): %v", table, column, err)
+		return
+	}
+	if count > 0 {
+		return // Column already exists.
+	}
+	query := fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s %s", table, column, colType)
+	if _, err := db.Exec(query); err != nil {
+		log.Printf("[db] migration error (ADD %s.%s): %v", table, column, err)
+	} else {
+		log.Printf("[db] migration: added column %s.%s", table, column)
+	}
 }
 
 // ─── Chunk Operations ───────────────────────────────────────────────
@@ -93,6 +132,125 @@ func InsertChunk(db *sql.DB, filename string, chunkIndex int, content string, em
 		filename, chunkIndex, content, string(embJSON),
 	)
 	return err
+}
+
+// InsertChunkReturningID stores a chunk and returns its auto-increment ID.
+func InsertChunkReturningID(db *sql.DB, filename string, chunkIndex int, content string, embedding []float32) (int64, error) {
+	var embStr *string
+	if embedding != nil {
+		b, err := json.Marshal(embedding)
+		if err != nil {
+			return 0, fmt.Errorf("marshal embedding: %w", err)
+		}
+		s := string(b)
+		embStr = &s
+	}
+	res, err := db.Exec(
+		`INSERT INTO chunks (filename, chunk_index, content, embedding) VALUES (?, ?, ?, ?)`,
+		filename, chunkIndex, content, embStr,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return res.LastInsertId()
+}
+
+// SaveVerbalization updates a chunk with its verbalization text and embedding.
+func SaveVerbalization(db *sql.DB, chunkID int64, verbalization string, embedding []float32) error {
+	var embStr *string
+	if embedding != nil {
+		b, err := json.Marshal(embedding)
+		if err != nil {
+			return fmt.Errorf("marshal verbalization embedding: %w", err)
+		}
+		s := string(b)
+		embStr = &s
+	}
+	_, err := db.Exec(
+		`UPDATE chunks SET verbalization = ?, verbalization_embedding = ? WHERE id = ?`,
+		verbalization, embStr, chunkID,
+	)
+	return err
+}
+
+// ─── QA Pair Operations ─────────────────────────────────────────────
+
+// QAPair represents a question-answer pair stored in MySQL.
+type QAPair struct {
+	ID           int    `json:"id"`
+	Filename     string `json:"filename"`
+	FunctionName string `json:"function_name"`
+	Question     string `json:"question"`
+	AnswerJSON   []byte `json:"answer_json"`
+}
+
+// SaveQAPair stores a Q&A pair with its embedding.
+func SaveQAPair(db *sql.DB, filename, functionName, question string, answerJSON []byte, embedding []float32) error {
+	var embStr *string
+	if embedding != nil {
+		b, err := json.Marshal(embedding)
+		if err != nil {
+			return fmt.Errorf("marshal qa embedding: %w", err)
+		}
+		s := string(b)
+		embStr = &s
+	}
+	_, err := db.Exec(
+		`INSERT INTO qa_pairs (filename, function_name, question, answer_json, embedding)
+		 VALUES (?, ?, ?, ?, ?)`,
+		filename, functionName, question, string(answerJSON), embStr,
+	)
+	return err
+}
+
+// GetQASimilar retrieves the top K most similar Q&A pairs using cosine similarity.
+func GetQASimilar(db *sql.DB, filename string, queryEmbedding []float32, topK int) ([]QAPair, error) {
+	rows, err := db.Query(
+		`SELECT id, filename, function_name, question, COALESCE(answer_json, '{}'), embedding
+		 FROM qa_pairs WHERE filename = ? AND embedding IS NOT NULL`,
+		filename,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	type scored struct {
+		pair       QAPair
+		similarity float64
+	}
+	items := make([]scored, 0, 32)
+
+	for rows.Next() {
+		var p QAPair
+		var embStr string
+		var answerStr string
+		if err := rows.Scan(&p.ID, &p.Filename, &p.FunctionName, &p.Question, &answerStr, &embStr); err != nil {
+			return nil, err
+		}
+		p.AnswerJSON = []byte(answerStr)
+
+		var emb []float32
+		if err := json.Unmarshal([]byte(embStr), &emb); err != nil {
+			log.Printf("[db] warning: failed to parse qa embedding, skipping: %v", err)
+			continue
+		}
+		sim := cosineSimilarity(queryEmbedding, emb)
+		items = append(items, scored{pair: p, similarity: sim})
+	}
+	if err = rows.Err(); err != nil {
+		return nil, err
+	}
+
+	sort.Slice(items, func(i, j int) bool {
+		return items[i].similarity > items[j].similarity
+	})
+
+	results := make([]QAPair, 0, topK)
+	for i := 0; i < len(items) && i < topK; i++ {
+		results = append(results, items[i].pair)
+	}
+	return results, nil
 }
 
 // ─── Rule Operations ────────────────────────────────────────────────
@@ -291,10 +449,12 @@ type chunkWithEmbedding struct {
 	similarity float64
 }
 
-// QuerySimilar retrieves the top K most similar chunks for a filename.
+// QuerySimilar retrieves the top K most similar chunks using verbalization embeddings.
+// Falls back to raw embeddings if no verbalization embeddings exist.
 func QuerySimilar(db *sql.DB, filename string, queryEmbedding []float32, topK int) ([]string, error) {
 	rows, err := db.Query(
-		`SELECT content, embedding FROM chunks WHERE filename = ?`,
+		`SELECT content, verbalization_embedding FROM chunks
+		 WHERE filename = ? AND verbalization_embedding IS NOT NULL`,
 		filename,
 	)
 	if err != nil {
@@ -310,7 +470,7 @@ func QuerySimilar(db *sql.DB, filename string, queryEmbedding []float32, topK in
 		}
 		var emb []float32
 		if err := json.Unmarshal([]byte(embStr), &emb); err != nil {
-			log.Printf("[db] warning: failed to parse embedding for chunk, skipping: %v", err)
+			log.Printf("[db] warning: failed to parse verbalization embedding, skipping: %v", err)
 			continue
 		}
 		sim := cosineSimilarity(queryEmbedding, emb)
@@ -324,12 +484,56 @@ func QuerySimilar(db *sql.DB, filename string, queryEmbedding []float32, topK in
 		return nil, err
 	}
 
+	// Fallback: if no verbalization embeddings found, use raw embeddings.
+	if len(chunks) == 0 {
+		return querySimilarFallback(db, filename, queryEmbedding, topK)
+	}
+
 	// Sort by similarity descending.
 	sort.Slice(chunks, func(i, j int) bool {
 		return chunks[i].similarity > chunks[j].similarity
 	})
 
 	// Return top K contents.
+	results := make([]string, 0, topK)
+	for i := 0; i < len(chunks) && i < topK; i++ {
+		results = append(results, chunks[i].content)
+	}
+	return results, nil
+}
+
+// querySimilarFallback is the original query path using raw embedding column.
+func querySimilarFallback(db *sql.DB, filename string, queryEmbedding []float32, topK int) ([]string, error) {
+	rows, err := db.Query(
+		`SELECT content, embedding FROM chunks WHERE filename = ? AND embedding IS NOT NULL`,
+		filename,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	chunks := make([]chunkWithEmbedding, 0, 64)
+	for rows.Next() {
+		var content, embStr string
+		if err := rows.Scan(&content, &embStr); err != nil {
+			return nil, err
+		}
+		var emb []float32
+		if err := json.Unmarshal([]byte(embStr), &emb); err != nil {
+			continue
+		}
+		sim := cosineSimilarity(queryEmbedding, emb)
+		chunks = append(chunks, chunkWithEmbedding{content: content, embedding: emb, similarity: sim})
+	}
+	if err = rows.Err(); err != nil {
+		return nil, err
+	}
+
+	sort.Slice(chunks, func(i, j int) bool {
+		return chunks[i].similarity > chunks[j].similarity
+	})
+
 	results := make([]string, 0, topK)
 	for i := 0; i < len(chunks) && i < topK; i++ {
 		results = append(results, chunks[i].content)
@@ -358,12 +562,15 @@ func cosineSimilarity(a, b []float32) float64 {
 	return dotProduct / denom
 }
 
-// DeleteFileData removes all chunks and rules for a filename (for re-upload).
+// DeleteFileData removes all chunks, rules, and qa_pairs for a filename (for re-upload).
 func DeleteFileData(db *sql.DB, filename string) error {
 	if _, err := db.Exec(`DELETE FROM chunks WHERE filename = ?`, filename); err != nil {
 		return err
 	}
 	if _, err := db.Exec(`DELETE FROM rules WHERE filename = ?`, filename); err != nil {
+		return err
+	}
+	if _, err := db.Exec(`DELETE FROM qa_pairs WHERE filename = ?`, filename); err != nil {
 		return err
 	}
 	return nil

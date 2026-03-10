@@ -5,8 +5,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"regexp"
 	"strings"
 )
+
+// ─── Types ──────────────────────────────────────────────────────────
 
 // PipelineResult is the final output returned to the API caller.
 type PipelineResult struct {
@@ -19,45 +22,297 @@ type PipelineResult struct {
 	Log     []string    `json:"log"`
 }
 
+// UploadResult is the response for the upload endpoint.
+type UploadResult struct {
+	Chunks   int    `json:"chunks"`
+	QAPairs  int    `json:"qa_pairs"`
+	Rules    int    `json:"rules"`
+	Filename string `json:"filename"`
+}
+
+// PHPFunction represents a parsed PHP function.
+type PHPFunction struct {
+	Name string
+	Body string
+}
+
+// SSEWriter abstracts SSE event writing for streaming pipeline results.
+type SSEWriter interface {
+	SendLog(msg string)
+	SendToken(token string)
+	SendResult(result *PipelineResult)
+	Flush()
+}
+
+// ─── PHP Function Parser ────────────────────────────────────────────
+
+// phpFuncRegex matches PHP function declarations.
+var phpFuncRegex = regexp.MustCompile(`(?:public|protected|private)(?:\s+static)?\s+function\s+(\w+)`)
+
+// parsePHPFunctions extracts functions from PHP source by matching
+// the declaration and tracking brace depth to find the closing }.
+func parsePHPFunctions(source string) []PHPFunction {
+	matches := phpFuncRegex.FindAllStringSubmatchIndex(source, -1)
+	if len(matches) == 0 {
+		return nil
+	}
+
+	functions := make([]PHPFunction, 0, len(matches))
+
+	for _, match := range matches {
+		name := source[match[2]:match[3]]
+
+		// Find the opening brace after the function declaration.
+		rest := source[match[0]:]
+		braceIdx := strings.Index(rest, "{")
+		if braceIdx < 0 {
+			continue
+		}
+
+		// Track brace depth to find the matching closing brace.
+		depth := 0
+		endIdx := -1
+		for i := braceIdx; i < len(rest); i++ {
+			switch rest[i] {
+			case '{':
+				depth++
+			case '}':
+				depth--
+				if depth == 0 {
+					endIdx = i + 1
+				}
+			}
+			if endIdx >= 0 {
+				break
+			}
+		}
+
+		if endIdx < 0 {
+			// No matching brace found — take everything until next function or EOF.
+			endIdx = len(rest)
+		}
+
+		body := rest[:endIdx]
+		functions = append(functions, PHPFunction{Name: name, Body: body})
+	}
+
+	return functions
+}
+
+// ─── Upload Processing (Code Verbalization Pipeline) ────────────────
+
+// ProcessUpload handles the full upload flow: parse → verbalize → embed → QA.
+func ProcessUpload(db *sql.DB, fileContent, filename string) (*UploadResult, error) {
+	// Clear previous data for this file.
+	if err := DeleteFileData(db, filename); err != nil {
+		log.Printf("[upload] warning: failed to clear old data for %s: %v", filename, err)
+	}
+
+	// Step 1 — Parse PHP into functions (or fall back to fixed chunks).
+	functions := parsePHPFunctions(fileContent)
+
+	var chunks []string
+	if len(functions) == 0 {
+		log.Printf("[upload] no PHP functions found, falling back to fixed 512-char chunks")
+		chunks = chunkContentFixed(fileContent, 512)
+	}
+
+	totalQAPairs := 0
+
+	if len(functions) > 0 {
+		// Step 2 — Process each function through the verbalization pipeline.
+		for i, fn := range functions {
+			log.Printf("[upload] processing function %d/%d: %s", i+1, len(functions), fn.Name)
+
+			// 2a. Save the raw function body as a chunk.
+			chunkID, err := InsertChunkReturningID(db, filename, i, fn.Body, nil)
+			if err != nil {
+				log.Printf("[upload] error: insert chunk for %s: %v", fn.Name, err)
+				continue
+			}
+
+			// 2b. Verbalize the function.
+			verbalization, err := Verbalize(fn.Body)
+			if err != nil {
+				log.Printf("[upload] warning: verbalize failed for %s: %v, using raw body", fn.Name, err)
+				verbalization = fn.Body // Fallback to raw body.
+			}
+
+			// 2c. Embed the verbalization and save it.
+			verbEmb, err := Embed(verbalization)
+			if err != nil {
+				log.Printf("[upload] warning: embed verbalization failed for %s: %v", fn.Name, err)
+			}
+			if err := SaveVerbalization(db, chunkID, verbalization, verbEmb); err != nil {
+				log.Printf("[upload] warning: save verbalization failed for %s: %v", fn.Name, err)
+			}
+
+			// 2d. Generate Q&A pairs from the verbalization.
+			qaPairs, err := GenerateQA(verbalization)
+			if err != nil {
+				log.Printf("[upload] warning: GenerateQA failed for %s: %v", fn.Name, err)
+				qaPairs = nil
+			}
+			for _, pair := range qaPairs {
+				qEmb, embErr := Embed(pair.Question)
+				if embErr != nil {
+					log.Printf("[upload] warning: embed QA question failed: %v", embErr)
+					qEmb = nil
+				}
+				if saveErr := SaveQAPair(db, filename, fn.Name, pair.Question, pair.Answer, qEmb); saveErr != nil {
+					log.Printf("[upload] warning: save QA pair failed: %v", saveErr)
+				} else {
+					totalQAPairs++
+				}
+			}
+
+			log.Printf("[upload] processed function: %s → %d QA pairs", fn.Name, len(qaPairs))
+		}
+	} else {
+		// Fallback path: embed fixed chunks without verbalization.
+		for i, chunk := range chunks {
+			embedding, err := Embed(chunk)
+			if err != nil {
+				log.Printf("[upload] warning: embed failed for chunk %d: %v", i, err)
+				embedding = nil
+			}
+			if err := InsertChunk(db, filename, i, chunk, embedding); err != nil {
+				log.Printf("[upload] error: insert chunk %d: %v", i, err)
+			}
+		}
+	}
+
+	// Step 3 — Extract rules via LLM (unchanged from original).
+	rulesCount := 0
+	extractedRules, err := extractRules(fileContent)
+	if err != nil {
+		log.Printf("[upload] warning: rule extraction failed: %v", err)
+	} else {
+		for _, rule := range extractedRules {
+			if err := InsertRule(db, filename, rule); err != nil {
+				log.Printf("[upload] warning: insert rule failed: %v", err)
+			} else {
+				rulesCount++
+			}
+		}
+	}
+
+	chunkCount := len(functions)
+	if chunkCount == 0 {
+		chunkCount = len(chunks)
+	}
+
+	log.Printf("[upload] done: %d chunks, %d QA pairs, %d rules for %s",
+		chunkCount, totalQAPairs, rulesCount, filename)
+
+	return &UploadResult{
+		Chunks:   chunkCount,
+		QAPairs:  totalQAPairs,
+		Rules:    rulesCount,
+		Filename: filename,
+	}, nil
+}
+
+// chunkContentFixed splits content into fixed-size chunks (fallback for non-PHP files).
+func chunkContentFixed(content string, maxSize int) []string {
+	lines := strings.Split(content, "\n")
+	chunks := make([]string, 0, len(lines)/10+1)
+	var current strings.Builder
+
+	boundaries := []string{"function ", "func ", "class ", "public ", "private ", "protected ", "def ", "module "}
+
+	for _, line := range lines {
+		if current.Len() > maxSize/2 {
+			trimmedLine := strings.TrimSpace(line)
+			isBoundary := false
+			for _, b := range boundaries {
+				if strings.HasPrefix(trimmedLine, b) {
+					isBoundary = true
+					break
+				}
+			}
+			if isBoundary && current.Len() > 0 {
+				chunks = append(chunks, current.String())
+				current.Reset()
+			}
+		}
+
+		current.WriteString(line)
+		current.WriteString("\n")
+
+		if current.Len() >= maxSize {
+			chunks = append(chunks, current.String())
+			current.Reset()
+		}
+	}
+
+	if current.Len() > 0 {
+		chunks = append(chunks, current.String())
+	}
+
+	return chunks
+}
+
+// ─── Pipeline Run (SSE-streaming) ───────────────────────────────────
+
 // RunPipeline orchestrates a full RAG + evaluation + self-correction loop.
-func RunPipeline(db *sql.DB, filename, query string) (*PipelineResult, error) {
-	plog := make([]string, 0, 16) // Pipeline log for the UI console.
-	plog = append(plog, fmt.Sprintf("Starting pipeline for file=%s", filename))
+// If an SSEWriter is provided, events are streamed in real time.
+func RunPipeline(db *sql.DB, filename, query string, sse SSEWriter) (*PipelineResult, error) {
+	plog := make([]string, 0, 16)
+
+	emit := func(msg string) {
+		plog = append(plog, msg)
+		if sse != nil {
+			sse.SendLog(msg)
+			sse.Flush()
+		}
+	}
+
+	emit(fmt.Sprintf("Starting pipeline for file=%s", filename))
 
 	// 1. Embed the query.
-	plog = append(plog, "Embedding query with nomic-embed-text...")
+	emit("Embedding query with nomic-embed-text...")
 	queryEmbedding, err := Embed(query)
 	if err != nil {
 		return nil, fmt.Errorf("embed query: %w", err)
 	}
-	plog = append(plog, fmt.Sprintf("Query embedded (%d dimensions)", len(queryEmbedding)))
+	emit(fmt.Sprintf("Query embedded (%d dimensions)", len(queryEmbedding)))
 
-	// 2. Retrieve top 5 similar chunks.
-	plog = append(plog, "Searching for similar chunks (cosine similarity)...")
-	chunks, err := QuerySimilar(db, filename, queryEmbedding, 5)
+	// 2. Retrieve top 3 similar chunks (using verbalization embeddings).
+	emit("Searching for similar functions (verbalization cosine similarity)...")
+	chunks, err := QuerySimilar(db, filename, queryEmbedding, 3)
 	if err != nil {
 		return nil, fmt.Errorf("query similar: %w", err)
 	}
-	plog = append(plog, fmt.Sprintf("Found %d relevant chunks", len(chunks)))
+	emit(fmt.Sprintf("Found %d relevant functions", len(chunks)))
 
 	if len(chunks) == 0 {
 		return nil, fmt.Errorf("no chunks found for file '%s'", filename)
 	}
 
-	// 3. Load rules for this file.
+	// 3. Retrieve top 3 similar Q&A examples.
+	emit("Searching for similar Q&A examples...")
+	qaPairs, err := GetQASimilar(db, filename, queryEmbedding, 3)
+	if err != nil {
+		log.Printf("[pipeline] warning: QA search failed: %v", err)
+		qaPairs = nil
+	}
+	emit(fmt.Sprintf("Found %d relevant Q&A examples", len(qaPairs)))
+
+	// 4. Load rules for this file.
 	rules, err := GetRules(db, filename)
 	if err != nil {
 		return nil, fmt.Errorf("get rules: %w", err)
 	}
-	plog = append(plog, fmt.Sprintf("Loaded %d validation rules", len(rules)))
+	emit(fmt.Sprintf("Loaded %d validation rules", len(rules)))
 
-	// 4. Build the context string.
-	context := buildContext(chunks)
+	// 5. Build the enriched context.
+	contextStr := buildEnrichedContext(chunks, qaPairs)
 
 	// Build rules summary for prompt injection.
 	rulesSummary := buildRulesSummary(rules)
 
-	// 5. Create run record.
+	// 6. Create run record.
 	graphJSON, _ := json.Marshal(map[string]interface{}{
 		"filename": filename,
 		"query":    query,
@@ -67,7 +322,7 @@ func RunPipeline(db *sql.DB, filename, query string) (*PipelineResult, error) {
 		log.Printf("[pipeline] warning: failed to insert run: %v", err)
 	}
 
-	// 6. Self-correction loop.
+	// 7. Self-correction loop.
 	var (
 		correctionText string
 		lastOutput     string
@@ -79,41 +334,51 @@ func RunPipeline(db *sql.DB, filename, query string) (*PipelineResult, error) {
 
 	for retries = 0; retries < maxRetries; retries++ {
 		if retries > 0 {
-			plog = append(plog, fmt.Sprintf("Retry %d/%d — injecting correction...", retries, maxRetries))
+			emit(fmt.Sprintf("Retry %d/%d — injecting correction...", retries, maxRetries))
 		}
 
 		// Build the prompt.
-		prompt := buildPrompt(context, rulesSummary, query, correctionText)
+		prompt := buildPrompt(contextStr, rulesSummary, query, correctionText)
 
-		plog = append(plog, "Calling llama3...")
-		response, err := Chat(prompt)
+		emit("Calling llama3...")
+
+		// Stream tokens via SSE if available, else use regular Chat.
+		var response string
+		if sse != nil {
+			response, err = ChatStream(prompt, func(token string) {
+				sse.SendToken(token)
+				sse.Flush()
+			})
+		} else {
+			response, err = Chat(prompt)
+		}
 		if err != nil {
 			return nil, fmt.Errorf("chat (attempt %d): %w", retries+1, err)
 		}
-		lastOutput = response
-		plog = append(plog, fmt.Sprintf("Received response (%d chars)", len(response)))
 
-		// 7. Evaluate.
-		plog = append(plog, "Evaluating output against rules...")
+		lastOutput = response
+		emit(fmt.Sprintf("Received response (%d chars)", len(response)))
+
+		// 8. Evaluate.
+		emit("Evaluating output against rules...")
 		lastResult = Evaluate(response, rules)
-		plog = append(plog, fmt.Sprintf("Score: %.2f (T1=%.2f, T2=%.2f) | Passed: %v",
+		emit(fmt.Sprintf("Score: %.2f (T1=%.2f, T2=%.2f) | Passed: %v",
 			lastResult.Score, lastResult.Tier1Score, lastResult.Tier2Score, lastResult.Passed))
 
 		if lastResult.Passed {
-			plog = append(plog, "✓ Output passed evaluation!")
+			emit("✓ Output passed evaluation!")
 			break
 		}
 
-		// 8. Build correction and store it.
+		// 9. Build correction and store it.
 		errorsStr := strings.Join(lastResult.Errors, "; ")
 		correctionText = fmt.Sprintf(
 			"Previous attempt failed with score %.2f. Errors: %s. Fix these in your next response. Return ONLY valid JSON with no markdown wrapping.",
 			lastResult.Score, errorsStr,
 		)
 
-		plog = append(plog, fmt.Sprintf("✗ Failed evaluation (%d errors), storing correction...", len(lastResult.Errors)))
+		emit(fmt.Sprintf("✗ Failed evaluation (%d errors), storing correction...", len(lastResult.Errors)))
 
-		// Embed and store the correction.
 		corrEmb, embErr := Embed(correctionText)
 		if embErr != nil {
 			log.Printf("[pipeline] warning: failed to embed correction: %v", embErr)
@@ -124,7 +389,7 @@ func RunPipeline(db *sql.DB, filename, query string) (*PipelineResult, error) {
 		}
 	}
 
-	// 9. Parse output for the response.
+	// 10. Parse output for the response.
 	var parsedOutput interface{}
 	trimmed := strings.TrimSpace(lastOutput)
 	extracted := extractJSON(trimmed)
@@ -135,7 +400,7 @@ func RunPipeline(db *sql.DB, filename, query string) (*PipelineResult, error) {
 		parsedOutput = lastOutput // Fall back to raw string.
 	}
 
-	// 10. Update run record.
+	// 11. Update run record.
 	status := "passed"
 	if !lastResult.Passed {
 		status = "failed"
@@ -145,9 +410,9 @@ func RunPipeline(db *sql.DB, filename, query string) (*PipelineResult, error) {
 		log.Printf("[pipeline] warning: failed to update run: %v", updateErr)
 	}
 
-	plog = append(plog, fmt.Sprintf("Pipeline complete — status=%s, retries=%d", status, retries))
+	emit(fmt.Sprintf("Pipeline complete — status=%s, retries=%d", status, retries))
 
-	return &PipelineResult{
+	result := &PipelineResult{
 		Output:  parsedOutput,
 		Score:   lastResult.Score,
 		Retries: retries,
@@ -155,16 +420,36 @@ func RunPipeline(db *sql.DB, filename, query string) (*PipelineResult, error) {
 		Errors:  lastResult.Errors,
 		RunID:   runID,
 		Log:     plog,
-	}, nil
+	}
+
+	// Send final result via SSE if available.
+	if sse != nil {
+		sse.SendResult(result)
+		sse.Flush()
+	}
+
+	return result, nil
 }
 
 // ─── Prompt Construction ────────────────────────────────────────────
 
-func buildContext(chunks []string) string {
+// buildEnrichedContext creates a prompt context from code chunks, QA examples,
+// and past corrections.
+func buildEnrichedContext(chunks []string, qaPairs []QAPair) string {
 	var sb strings.Builder
+
+	sb.WriteString("RELEVANT CODE:\n")
 	for i, c := range chunks {
-		sb.WriteString(fmt.Sprintf("--- Chunk %d ---\n%s\n\n", i+1, c))
+		sb.WriteString(fmt.Sprintf("--- Function %d ---\n%s\n", i+1, c))
 	}
+
+	if len(qaPairs) > 0 {
+		sb.WriteString("\nEXAMPLES OF CORRECT OUTPUT FORMAT:\n")
+		for _, qa := range qaPairs {
+			sb.WriteString(fmt.Sprintf("Q: %s\nA: %s\n\n", qa.Question, string(qa.AnswerJSON)))
+		}
+	}
+
 	return sb.String()
 }
 
@@ -197,7 +482,6 @@ func buildPrompt(context, rulesSummary, query, correction string) string {
 		sb.WriteString("\n\n")
 	}
 
-	sb.WriteString("CODE CONTEXT:\n")
 	sb.WriteString(context)
 	sb.WriteString("\nQUERY: ")
 	sb.WriteString(query)

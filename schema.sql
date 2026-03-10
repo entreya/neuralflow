@@ -6,12 +6,14 @@ USE neuralflow;
 
 -- Stores uploaded file chunks + their embeddings
 CREATE TABLE IF NOT EXISTS chunks (
-  id          INT AUTO_INCREMENT PRIMARY KEY,
-  filename    VARCHAR(255) NOT NULL,
-  chunk_index INT NOT NULL,
-  content     TEXT NOT NULL,
-  embedding   JSON,
-  created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  id                       INT AUTO_INCREMENT PRIMARY KEY,
+  filename                 VARCHAR(255) NOT NULL,
+  chunk_index              INT NOT NULL,
+  content                  TEXT NOT NULL,
+  embedding                JSON,
+  verbalization            TEXT,
+  verbalization_embedding  JSON,
+  created_at               TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   INDEX idx_chunks_filename (filename)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
@@ -54,3 +56,16 @@ CREATE TABLE IF NOT EXISTS runs (
   output_json JSON,
   created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- Stores Q&A pairs generated from code verbalizations
+CREATE TABLE IF NOT EXISTS qa_pairs (
+  id            INT AUTO_INCREMENT PRIMARY KEY,
+  filename      VARCHAR(255) NOT NULL,
+  function_name VARCHAR(255),
+  question      TEXT,
+  answer_json   JSON,
+  embedding     JSON,
+  created_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  INDEX idx_qa_filename (filename)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+

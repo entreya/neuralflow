@@ -20,3 +20,12 @@ All notable changes to **NeuralFlow** will be documented in this file.
 - [FEAT] Rules and corrections tabs in right panel
 - [FEAT] Pipeline log console showing step-by-step execution
 - [FEAT] Typewriter effect for JSON output with blinking cursor and staggered console log reveal
+- [FEAT] Code verbalization pipeline — PHP functions → plain English → embedding → QA pairs
+- [FEAT] SSE streaming for `/api/run` — real-time LLM tokens, log events, and results
+- [FEAT] `qa_pairs` table for storing generated Q&A test cases per function
+- [FEAT] PHP function parser with regex + brace-depth matching
+- [FEAT] `Verbalize()` and `GenerateQA()` Ollama wrapper functions
+- [FEAT] `ChatStream()` for streaming LLM output token-by-token
+- [FEAT] Verbalization-based similarity search (falls back to raw embeddings)
+- [FEAT] `ProcessUpload()` — centralized upload flow with per-function progress logging
+- [PERF] Enriched RAG context: code chunks + QA examples + corrections in prompt

@@ -915,9 +915,6 @@
             isUploading: false,
         };
 
-        // Active typewriter animation handle (for cancellation).
-        let _typewriterAbort = null;
-
         // ─── DOM References ─────────────────────────────────────
         const $ = (sel) => document.querySelector(sel);
         const $$ = (sel) => document.querySelectorAll(sel);
@@ -1165,87 +1162,11 @@
             dom.runBtn.disabled = true;
             dom.runBtn.innerHTML = '<span class="spinner"></span> Running...';
 
+            // Build the SSE-ready result shell.
             dom.resultsArea.innerHTML = `
-      <div class="empty-state">
-        <div class="loading-dot" style="font-size:32px;">⚙️</div>
-        <div class="empty-state-text">Running pipeline...</div>
-        <div class="empty-state-sub">Embedding → RAG → LLM → Evaluate → Self-correct</div>
-      </div>
-    `;
-
-            try {
-                const res = await apiPost('/api/run', {
-                    filename: state.activeFile,
-                    query: query,
-                });
-
-                if (res.error) {
-                    dom.resultsArea.innerHTML = `
-          <div class="empty-state">
-            <div class="empty-state-icon">❌</div>
-            <div class="empty-state-text">Pipeline Failed</div>
-            <div class="empty-state-sub">${escapeHtml(res.error)}</div>
-          </div>
-        `;
-                    showToast('Pipeline failed', 'error');
-                    return;
-                }
-
-                renderResult(res.data);
-                showToast(`Score: ${(res.data.score * 100).toFixed(0)}% — ${res.data.passed ? 'Passed' : 'Failed'}`,
-                    res.data.passed ? 'success' : 'error');
-
-                // Reload corrections after a run.
-                loadCorrections(state.activeFile);
-            } catch (err) {
-                dom.resultsArea.innerHTML = `
-        <div class="empty-state">
-          <div class="empty-state-icon">💥</div>
-          <div class="empty-state-text">Request Failed</div>
-          <div class="empty-state-sub">${escapeHtml(err.message)}</div>
-        </div>
-      `;
-                showToast(`Error: ${err.message}`, 'error');
-            } finally {
-                state.isRunning = false;
-                dom.runBtn.disabled = false;
-                dom.runBtn.innerHTML = 'Run ▸';
-            }
-        }
-
-        function renderResult(data) {
-            // Cancel any in-progress typewriter from a previous run.
-            if (_typewriterAbort) { _typewriterAbort.abort = true; }
-            const ctrl = { abort: false };
-            _typewriterAbort = ctrl;
-
-            const scorePercent = (data.score * 100).toFixed(1);
-            const scoreClass = data.passed ? 'pass' : (data.score >= 0.5 ? 'warn' : 'fail');
-            const statusIcon = data.passed ? '✓' : '✗';
-
-            const rawJson = typeof data.output === 'string'
-                ? data.output
-                : JSON.stringify(data.output, null, 2);
-
-            const errorsHtml = (data.errors || []).length > 0
-                ? `<div style="margin: 12px 0;">
-           <div class="console-title">Evaluation Errors</div>
-           ${data.errors.map(e => `<div style="font-size:11px; color:var(--red); padding:3px 0;">• ${escapeHtml(e)}</div>`).join('')}
-         </div>`
-                : '';
-
-            // Build the shell — JSON output and console log start empty.
-            dom.resultsArea.innerHTML = `
-      <div class="result-header">
-        <div class="score-badge ${scoreClass}">
-          ${statusIcon} Score: ${scorePercent}%
-        </div>
-        <div class="stat-chip">Retries: ${data.retries}</div>
-        <div class="stat-chip">Run #${data.run_id}</div>
-        <div class="stat-chip">${data.passed ? '✓ Passed' : '✗ Failed'}</div>
-      </div>
+      <div id="resultHeaderEl" class="result-header" style="display:none;"></div>
       <div id="jsonOutputEl" class="json-output"><span class="typewriter-cursor"></span></div>
-      ${errorsHtml}
+      <div id="errorsEl"></div>
       <div class="console-section">
         <div class="console-title">Pipeline Log</div>
         <div id="consoleLogEl" class="console-log"></div>
@@ -1254,87 +1175,147 @@
 
             const jsonEl = document.getElementById('jsonOutputEl');
             const consoleEl = document.getElementById('consoleLogEl');
+            const headerEl = document.getElementById('resultHeaderEl');
+            const errorsEl = document.getElementById('errorsEl');
 
-            // Start the typewriter for JSON output then stagger the console log.
-            typewriteJSON(jsonEl, rawJson, ctrl, () => {
-                staggerConsoleLog(consoleEl, data.log || [], ctrl);
-            });
-        }
+            // Track accumulated tokens for syntax highlighting.
+            let tokenBuffer = '';
+            let highlightTimer = null;
 
-        // ─── Typewriter Engine ──────────────────────────────────
-
-        /**
-         * Types out JSON text character-by-character into `el` with syntax
-         * highlighting applied progressively. Appends a blinking cursor
-         * during typing and removes it on completion.
-         *
-         * @param {HTMLElement} el      Target container element.
-         * @param {string}      rawJson The raw JSON string to type out.
-         * @param {object}      ctrl    Abort controller { abort: bool }.
-         * @param {Function}    onDone  Callback when typing finishes.
-         */
-        function typewriteJSON(el, rawJson, ctrl, onDone) {
-            // We type the *plain text* and periodically re-highlight
-            // the visible portion. Typing speed adapts to content length.
-            const len = rawJson.length;
-
-            // Characters per frame tick — faster for large outputs.
-            const charsPerTick = len > 2000 ? 8 : len > 800 ? 4 : 2;
-            const tickMs = 12; // ~83 fps worth of ticks
-
-            let pos = 0;
-
-            function tick() {
-                if (ctrl.abort) return;
-
-                // Advance position.
-                pos = Math.min(pos + charsPerTick, len);
-                const visible = rawJson.slice(0, pos);
-
-                // Apply syntax highlighting to the visible portion.
-                el.innerHTML = syntaxHighlight(visible)
-                    + (pos < len ? '<span class="typewriter-cursor"></span>' : '');
-
-                // Auto-scroll to bottom.
-                el.scrollTop = el.scrollHeight;
-
-                if (pos < len) {
-                    requestAnimationFrame(() => setTimeout(tick, tickMs));
-                } else {
-                    // Done typing.
-                    if (onDone) onDone();
-                }
+            // Debounced syntax highlight — re-highlight every 50ms during streaming.
+            function scheduleHighlight() {
+                if (highlightTimer) return;
+                highlightTimer = setTimeout(() => {
+                    highlightTimer = null;
+                    jsonEl.innerHTML = syntaxHighlight(tokenBuffer)
+                        + '<span class="typewriter-cursor"></span>';
+                    jsonEl.scrollTop = jsonEl.scrollHeight;
+                }, 50);
             }
 
-            tick();
-        }
+            try {
+                const response = await fetch('/api/run', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ filename: state.activeFile, query }),
+                });
 
-        /**
-         * Reveals console log lines one-by-one with a stagger delay
-         * and a slide-in animation.
-         */
-        function staggerConsoleLog(el, lines, ctrl) {
-            if (!lines.length) return;
+                const reader = response.body.getReader();
+                const decoder = new TextDecoder();
+                let sseBuffer = '';
 
-            let i = 0;
-            const delayMs = 80; // ms between each line appearing
+                while (true) {
+                    const { done, value } = await reader.read();
+                    if (done) break;
 
-            function showNext() {
-                if (ctrl.abort || i >= lines.length) return;
+                    sseBuffer += decoder.decode(value, { stream: true });
 
-                const lineEl = document.createElement('div');
-                lineEl.className = 'console-line typing-in';
-                lineEl.textContent = lines[i];
-                el.appendChild(lineEl);
-                el.scrollTop = el.scrollHeight;
-                i++;
+                    // Parse SSE events from the buffer.
+                    const lines = sseBuffer.split('\n');
+                    sseBuffer = lines.pop(); // Keep incomplete line in buffer.
 
-                if (i < lines.length) {
-                    setTimeout(showNext, delayMs);
+                    let currentEvent = null;
+                    for (const line of lines) {
+                        if (line.startsWith('event: ')) {
+                            currentEvent = line.slice(7).trim();
+                        } else if (line.startsWith('data: ') && currentEvent) {
+                            const rawData = line.slice(6);
+                            try {
+                                const data = JSON.parse(rawData);
+                                handleSSEEvent(currentEvent, data);
+                            } catch { /* ignore parse errors */ }
+                            currentEvent = null;
+                        } else if (line === '') {
+                            currentEvent = null;
+                        }
+                    }
                 }
+            } catch (err) {
+                dom.resultsArea.innerHTML = `
+        <div class="empty-state">
+          <div class="empty-state-icon">💥</div>
+          <div class="empty-state-text">Connection Failed</div>
+          <div class="empty-state-sub">${escapeHtml(err.message)}</div>
+        </div>
+      `;
+                showToast(`Error: ${err.message}`, 'error');
+            } finally {
+                state.isRunning = false;
+                dom.runBtn.disabled = false;
+                dom.runBtn.innerHTML = 'Run ▸';
+                // Remove blinking cursor when done.
+                const cursor = jsonEl?.querySelector('.typewriter-cursor');
+                if (cursor) cursor.remove();
             }
 
-            showNext();
+            function handleSSEEvent(event, data) {
+                switch (event) {
+                    case 'log': {
+                        const lineEl = document.createElement('div');
+                        lineEl.className = 'console-line typing-in';
+                        lineEl.textContent = data;
+                        consoleEl.appendChild(lineEl);
+                        consoleEl.scrollTop = consoleEl.scrollHeight;
+                        break;
+                    }
+
+                    case 'token': {
+                        tokenBuffer += data;
+                        scheduleHighlight();
+                        break;
+                    }
+
+                    case 'result': {
+                        // Final result — render score badge and errors.
+                        const scorePercent = (data.score * 100).toFixed(1);
+                        const scoreClass = data.passed ? 'pass' : (data.score >= 0.5 ? 'warn' : 'fail');
+                        const statusIcon = data.passed ? '✓' : '✗';
+
+                        headerEl.style.display = 'flex';
+                        headerEl.innerHTML = `
+              <div class="score-badge ${scoreClass}">
+                ${statusIcon} Score: ${scorePercent}%
+              </div>
+              <div class="stat-chip">Retries: ${data.retries}</div>
+              <div class="stat-chip">Run #${data.run_id}</div>
+              <div class="stat-chip">${data.passed ? '✓ Passed' : '✗ Failed'}</div>
+            `;
+
+                        // Render errors.
+                        if (data.errors && data.errors.length > 0) {
+                            errorsEl.innerHTML = `
+                <div style="margin: 12px 0;">
+                  <div class="console-title">Evaluation Errors</div>
+                  ${data.errors.map(e => `<div style="font-size:11px; color:var(--red); padding:3px 0;">• ${escapeHtml(e)}</div>`).join('')}
+                </div>
+              `;
+                        }
+
+                        // Final syntax highlight of the complete output.
+                        const finalJson = typeof data.output === 'string'
+                            ? data.output
+                            : JSON.stringify(data.output, null, 2);
+                        jsonEl.innerHTML = syntaxHighlight(finalJson);
+
+                        showToast(
+                            `Score: ${(data.score * 100).toFixed(0)}% — ${data.passed ? 'Passed' : 'Failed'}`,
+                            data.passed ? 'success' : 'error'
+                        );
+
+                        // Reload corrections after a run.
+                        loadCorrections(state.activeFile);
+                        break;
+                    }
+
+                    case 'error': {
+                        showToast(`Pipeline error: ${data}`, 'error');
+                        break;
+                    }
+
+                    case 'done':
+                        break;
+                }
+            }
         }
 
         // ─── Tabs ───────────────────────────────────────────────

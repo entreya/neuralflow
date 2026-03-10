@@ -1,13 +1,13 @@
 # NeuralFlow
 
-**Visual AI Pipeline Builder** — A working Go prototype that lets you upload code files, extract validation rules via LLM, run RAG queries against the code, and self-correct using an evaluator loop.
+**Visual AI Pipeline Builder** — A Go prototype that uploads code files, verbalizes PHP functions into plain English, generates Q&A test pairs, extracts validation rules via LLM, and runs RAG queries with SSE-streamed output and self-correction.
 
 ## Architecture
 
 ```
 ┌─────────────┐     ┌──────────────┐     ┌───────────┐
-│  Frontend    │────►│  Gin Server  │────►│  Ollama   │
-│  (Vanilla JS)│    │  (Go :8080)  │     │  llama3   │
+│  Frontend    │◄SSE─│  Gin Server  │────►│  Ollama   │
+│  (Vanilla JS)│────►│  (Go :8080)  │     │  llama3   │
 └─────────────┘     └──────┬───────┘     │  nomic    │
                            │             └───────────┘
                     ┌──────▼───────┐
@@ -16,6 +16,7 @@
                     │  rules       │
                     │  corrections │
                     │  runs        │
+                    │  qa_pairs    │
                     └──────────────┘
 ```
 
@@ -47,14 +48,14 @@ Open **http://localhost:8080** in your browser.
 
 ## API Reference
 
-| Method | Endpoint             | Description                          |
-|--------|----------------------|--------------------------------------|
-| POST   | `/api/upload`        | Upload a file (multipart form)       |
-| POST   | `/api/run`           | Run a RAG pipeline query             |
-| GET    | `/api/files`         | List uploaded files with stats       |
-| GET    | `/api/rules`         | Get inferred rules for a file        |
-| GET    | `/api/corrections`   | Get corrections for a file           |
-| GET    | `/health`            | Check MySQL + Ollama connectivity    |
+| Method | Endpoint             | Description                              |
+|--------|----------------------|------------------------------------------|
+| POST   | `/api/upload`        | Upload a file (verbalize + QA generate)  |
+| POST   | `/api/run`           | Run a RAG pipeline query (SSE stream)    |
+| GET    | `/api/files`         | List uploaded files with stats           |
+| GET    | `/api/rules`         | Get inferred rules for a file            |
+| GET    | `/api/corrections`   | Get corrections for a file               |
+| GET    | `/health`            | Check MySQL + Ollama connectivity        |
 
 ### POST /api/upload
 
@@ -62,10 +63,12 @@ Open **http://localhost:8080** in your browser.
 curl -F "file=@ExamFee.php" http://localhost:8080/api/upload
 ```
 
-### POST /api/run
+### POST /api/run (SSE)
+
+The response is a `text/event-stream` with events: `log`, `token`, `result`, `error`, `done`.
 
 ```bash
-curl -X POST http://localhost:8080/api/run \
+curl -N -X POST http://localhost:8080/api/run \
   -H "Content-Type: application/json" \
   -d '{"filename":"ExamFee.php","query":"student with 3 appearing papers"}'
 ```
@@ -74,15 +77,15 @@ curl -X POST http://localhost:8080/api/run \
 
 ```
 neuralflow/
-├── main.go        ← Gin server + API routes
-├── db.go          ← MySQL connection + queries + vector search
-├── ollama.go      ← Embed() and Chat() wrappers
-├── pipeline.go    ← RAG pipeline + self-correction loop
+├── main.go        ← Gin server + API routes + SSE handler
+├── db.go          ← MySQL connection + queries + vector search + QA pairs
+├── ollama.go      ← Embed, Chat, ChatStream, Verbalize, GenerateQA
+├── pipeline.go    ← ProcessUpload + RAG pipeline + self-correction loop
 ├── evaluator.go   ← Two-tier rule engine (universal + inferred)
-├── schema.sql     ← MySQL CREATE TABLE statements
+├── schema.sql     ← MySQL CREATE TABLE statements (5 tables)
 ├── go.mod / go.sum
 └── static/
-    └── index.html ← Complete single-file UI
+    └── index.html ← Complete single-file UI with SSE consumer
 ```
 
 ## Dependencies
@@ -95,8 +98,9 @@ neuralflow/
 
 ## How It Works
 
-1. **Upload** — File is chunked (~512 chars), each chunk embedded with `nomic-embed-text`, rules extracted via `llama3`
-2. **Query** — Query is embedded, top 5 similar chunks retrieved via cosine similarity in Go
-3. **Generate** — LLM generates JSON output using RAG context + rules
+1. **Upload** — PHP functions are parsed (regex + brace matching), each is verbalized by `llama3` into plain English, the verbalization is embedded and stored. 6 Q&A test pairs are generated per function. Rules are extracted via LLM.
+2. **Query** — Query is embedded, top 3 similar functions retrieved via verbalization cosine similarity + top 3 Q&A examples
+3. **Generate** — LLM generates JSON output using enriched context (code + QA examples + rules), streamed via SSE
 4. **Evaluate** — Two-tier scoring: universal checks (40%) + inferred rules (60%)
 5. **Self-Correct** — If score < 0.75, corrections are stored and injected into retries (max 3)
+
