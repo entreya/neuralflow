@@ -1,10 +1,13 @@
 package main
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
+	"os"
 	"regexp"
 	"strings"
 )
@@ -30,10 +33,13 @@ type UploadResult struct {
 	Filename string `json:"filename"`
 }
 
-// PHPFunction represents a parsed PHP function.
+// PHPFunction represents a parsed PHP function with visibility and line count.
 type PHPFunction struct {
-	Name string
-	Body string
+	Name       string
+	Body       string
+	Visibility string // "public" | "protected" | "private"
+	Lines      int    // line count of function body
+	IsStatic   bool
 }
 
 // SSEWriter abstracts SSE event writing for streaming pipeline results.
@@ -46,8 +52,8 @@ type SSEWriter interface {
 
 // ─── PHP Function Parser ────────────────────────────────────────────
 
-// phpFuncRegex matches PHP function declarations.
-var phpFuncRegex = regexp.MustCompile(`(?:public|protected|private)(?:\s+static)?\s+function\s+(\w+)`)
+// phpFuncRegex matches PHP function declarations, capturing visibility, static, and name.
+var phpFuncRegex = regexp.MustCompile(`(public|protected|private)(\s+static)?\s+function\s+(\w+)`)
 
 // parsePHPFunctions extracts functions from PHP source by matching
 // the declaration and tracking brace depth to find the closing }.
@@ -60,7 +66,9 @@ func parsePHPFunctions(source string) []PHPFunction {
 	functions := make([]PHPFunction, 0, len(matches))
 
 	for _, match := range matches {
-		name := source[match[2]:match[3]]
+		visibility := source[match[2]:match[3]] // group 1: public/protected/private
+		isStatic := match[4] >= 0               // group 2: " static" or absent
+		name := source[match[6]:match[7]]       // group 3: function name
 
 		// Find the opening brace after the function declaration.
 		rest := source[match[0]:]
@@ -93,7 +101,15 @@ func parsePHPFunctions(source string) []PHPFunction {
 		}
 
 		body := rest[:endIdx]
-		functions = append(functions, PHPFunction{Name: name, Body: body})
+		lines := strings.Count(body, "\n") + 1
+
+		functions = append(functions, PHPFunction{
+			Name:       name,
+			Body:       body,
+			Visibility: visibility,
+			Lines:      lines,
+			IsStatic:   isStatic,
+		})
 	}
 
 	return functions
@@ -102,7 +118,7 @@ func parsePHPFunctions(source string) []PHPFunction {
 // ─── Upload Processing (Code Verbalization Pipeline) ────────────────
 
 // ProcessUpload handles the full upload flow: parse → verbalize → embed → QA.
-func ProcessUpload(db *sql.DB, fileContent, filename string) (*UploadResult, error) {
+func ProcessUpload(ctx context.Context, db *sql.DB, fileContent, filename string) (*UploadResult, error) {
 	// Clear previous data for this file.
 	if err := DeleteFileData(db, filename); err != nil {
 		Broadcast("warn", fmt.Sprintf("Failed to clear old data for %s: %v", filename, err), nil)
@@ -124,47 +140,92 @@ func ProcessUpload(db *sql.DB, fileContent, filename string) (*UploadResult, err
 	if len(functions) > 0 {
 		// Step 2 — Process each function through the verbalization pipeline.
 		for i, fn := range functions {
+			// T1: Check for cancellation before starting each function.
+			select {
+			case <-ctx.Done():
+				Broadcast("warn", fmt.Sprintf("Training cancelled after %d/%d functions", i, len(functions)), nil)
+				return &UploadResult{
+					Chunks:   i,
+					QAPairs:  totalQAPairs,
+					Filename: filename,
+				}, ctx.Err()
+			default:
+			}
+
+			// T7: Include fnName + stage in progress meta.
 			Broadcast("progress", fmt.Sprintf("%s()", fn.Name), map[string]any{
 				"current": i + 1,
 				"total":   len(functions),
+				"fnName":  fn.Name,
+				"stage":   "verbalize",
 			})
 
-			// 2a. Save the raw function body as a chunk.
-			chunkID, err := InsertChunkReturningID(db, filename, i, fn.Body, nil)
+			// T4: Use InsertChunkWithFunction to link chunk to function.
+			chunkID, err := InsertChunkWithFunction(db, filename, i, fn.Name, fn.Body)
 			if err != nil {
 				Broadcast("error", fmt.Sprintf("Insert chunk failed for %s: %v", fn.Name, err), nil)
 				continue
 			}
 
 			// 2b. Verbalize the function.
-			Broadcast("info", fmt.Sprintf("Verbalizing %s()...", fn.Name), nil)
-			verbalization, err := Verbalize(fn.Body)
+			Broadcast("info", fmt.Sprintf("Verbalizing %s()...", fn.Name), map[string]any{"fnName": fn.Name})
+			verbalization, err := Verbalize(ctx, fn.Body)
 			if err != nil {
+				// T1: Cancel means stop immediately — do NOT fall back.
+				if errors.Is(err, context.Canceled) {
+					Broadcast("warn", fmt.Sprintf("Cancelled during verbalization of %s", fn.Name), nil)
+					db.Exec("DELETE FROM chunks WHERE id = ?", chunkID)
+					return &UploadResult{Chunks: i, QAPairs: totalQAPairs, Filename: filename}, ctx.Err()
+				}
+				// Non-cancel error: use raw body as fallback.
 				Broadcast("warn", fmt.Sprintf("Verbalize failed for %s, using raw body", fn.Name), nil)
-				verbalization = fn.Body // Fallback to raw body.
+				verbalization = fn.Body
 			}
 
 			// 2c. Embed the verbalization and save it.
-			verbEmb, err := Embed(verbalization)
+			verbEmb, err := Embed(ctx, verbalization)
 			if err != nil {
-				Broadcast("warn", fmt.Sprintf("Embed verbalization failed for %s: %v", fn.Name, err), nil)
+				// T1: Cancel → clean up and exit.
+				if errors.Is(err, context.Canceled) {
+					db.Exec("DELETE FROM chunks WHERE id = ?", chunkID)
+					return &UploadResult{Chunks: i, QAPairs: totalQAPairs, Filename: filename}, ctx.Err()
+				}
+				// T6: Non-cancel embed failure → save text only, chunk NOT retrievable.
+				Broadcast("warn", fmt.Sprintf(
+					"Embed failed for %s — verbalization saved but NOT retrievable (no vector)",
+					fn.Name), map[string]any{"fnName": fn.Name})
+				verbEmb = nil
 			}
+
 			if err := SaveVerbalization(db, chunkID, verbalization, verbEmb); err != nil {
 				Broadcast("error", fmt.Sprintf("Save verbalization failed for %s: %v", fn.Name, err), nil)
-			} else {
-				Broadcast("ok", fmt.Sprintf("Verbalized %s()", fn.Name), nil)
+			} else if verbEmb != nil {
+				// T6: Only broadcast "ok" if embedding succeeded (chunk IS retrievable).
+				Broadcast("ok", fmt.Sprintf("Verbalized %s()", fn.Name), map[string]any{"fnName": fn.Name})
 			}
 
 			// 2d. Generate Q&A pairs from the verbalization.
-			Broadcast("info", fmt.Sprintf("Generating QA for %s()...", fn.Name), nil)
-			qaPairs, err := GenerateQA(verbalization)
+			Broadcast("info", fmt.Sprintf("Generating QA for %s()...", fn.Name), map[string]any{"fnName": fn.Name, "stage": "qa"})
+			qaPairs, err := GenerateQA(ctx, verbalization)
 			if err != nil {
+				if errors.Is(err, context.Canceled) {
+					return &UploadResult{Chunks: i + 1, QAPairs: totalQAPairs, Filename: filename}, ctx.Err()
+				}
 				Broadcast("warn", fmt.Sprintf("GenerateQA failed for %s: %v", fn.Name, err), nil)
 				qaPairs = nil
 			}
 			fnQACount := 0
 			for _, pair := range qaPairs {
-				qEmb, embErr := Embed(pair.Question)
+				// T1: Check cancel inside QA embedding loop.
+				select {
+				case <-ctx.Done():
+					Broadcast("ok", fmt.Sprintf("%d QA pairs saved for %s()", fnQACount, fn.Name), map[string]any{
+						"fnName": fn.Name, "qa_count": fnQACount,
+					})
+					return &UploadResult{Chunks: i + 1, QAPairs: totalQAPairs, Filename: filename}, ctx.Err()
+				default:
+				}
+				qEmb, embErr := Embed(ctx, pair.Question)
 				if embErr != nil {
 					log.Printf("[upload] warning: embed QA question failed: %v", embErr)
 					qEmb = nil
@@ -177,13 +238,26 @@ func ProcessUpload(db *sql.DB, fileContent, filename string) (*UploadResult, err
 				}
 			}
 
-			Broadcast("data", fmt.Sprintf("%d QA pairs saved for %s()", fnQACount, fn.Name), nil)
+			// T7: Include fnName + qa_count in data broadcast.
+			Broadcast("ok", fmt.Sprintf("%d QA pairs saved for %s()", fnQACount, fn.Name), map[string]any{
+				"fnName":   fn.Name,
+				"qa_count": fnQACount,
+			})
 		}
 	} else {
 		// Fallback path: embed fixed chunks without verbalization.
 		for i, chunk := range chunks {
-			embedding, err := Embed(chunk)
+			// T1: Check cancel in fallback path too.
+			select {
+			case <-ctx.Done():
+				return &UploadResult{Chunks: i, Filename: filename}, ctx.Err()
+			default:
+			}
+			embedding, err := Embed(ctx, chunk)
 			if err != nil {
+				if errors.Is(err, context.Canceled) {
+					return &UploadResult{Chunks: i, Filename: filename}, ctx.Err()
+				}
 				Broadcast("warn", fmt.Sprintf("Embed failed for chunk %d: %v", i, err), nil)
 				embedding = nil
 			}
@@ -196,7 +270,7 @@ func ProcessUpload(db *sql.DB, fileContent, filename string) (*UploadResult, err
 	// Step 3 — Extract rules via LLM (unchanged from original).
 	Broadcast("info", "Extracting validation rules...", nil)
 	rulesCount := 0
-	extractedRules, err := extractRules(fileContent)
+	extractedRules, err := extractRules(ctx, fileContent)
 	if err != nil {
 		Broadcast("warn", fmt.Sprintf("Rule extraction failed: %v", err), nil)
 	} else {
@@ -228,6 +302,99 @@ func ProcessUpload(db *sql.DB, fileContent, filename string) (*UploadResult, err
 		Rules:    rulesCount,
 		Filename: filename,
 	}, nil
+}
+
+// RetrainMethod re-runs the verbalization and QA pipeline for a single method.
+func RetrainMethod(ctx context.Context, db *sql.DB, filename, functionName string) error {
+	fileContent, err := os.ReadFile(filename)
+	if err != nil {
+		return fmt.Errorf("could not read original file %s to re-parse: %v", filename, err)
+	}
+
+	functions := parsePHPFunctions(string(fileContent))
+	var targetFn *PHPFunction
+	for _, fn := range functions {
+		if fn.Name == functionName {
+			targetFn = &fn
+			break
+		}
+	}
+
+	if targetFn == nil {
+		return fmt.Errorf("function %s not found in file %s", functionName, filename)
+	}
+
+	// T3: Use InsertChunkWithFunction (old chunk already deleted by handleTrain T2 fix).
+	chunkID, err := InsertChunkWithFunction(db, filename, 0, functionName, targetFn.Body)
+	if err != nil {
+		return err
+	}
+
+	// Verbalize.
+	Broadcast("info", fmt.Sprintf("Verbalizing %s()...", functionName), map[string]any{"fnName": functionName})
+	verbalization, err := Verbalize(ctx, targetFn.Body)
+	if err != nil {
+		// T1: Cancel → clean up and exit.
+		if errors.Is(err, context.Canceled) {
+			db.Exec("DELETE FROM chunks WHERE id = ?", chunkID)
+			return ctx.Err()
+		}
+		Broadcast("warn", fmt.Sprintf("Verbalize failed for %s, using raw body", functionName), nil)
+		verbalization = targetFn.Body
+	}
+
+	// Embed & Save.
+	verbEmb, err := Embed(ctx, verbalization)
+	if err != nil {
+		if errors.Is(err, context.Canceled) {
+			db.Exec("DELETE FROM chunks WHERE id = ?", chunkID)
+			return ctx.Err()
+		}
+		Broadcast("warn", fmt.Sprintf(
+			"Embed failed for %s — verbalization saved but NOT retrievable (no vector)",
+			functionName), map[string]any{"fnName": functionName})
+		verbEmb = nil
+	}
+	if err := SaveVerbalization(db, chunkID, verbalization, verbEmb); err != nil {
+		return err
+	}
+	if verbEmb != nil {
+		Broadcast("ok", fmt.Sprintf("Verbalized %s()", functionName), map[string]any{"fnName": functionName})
+	}
+
+	// Generate QA.
+	Broadcast("info", fmt.Sprintf("Generating QA for %s()...", functionName), map[string]any{"fnName": functionName, "stage": "qa"})
+	qaPairs, err := GenerateQA(ctx, verbalization)
+	if err != nil {
+		if errors.Is(err, context.Canceled) {
+			return ctx.Err()
+		}
+		qaPairs = nil
+	}
+
+	fnQACount := 0
+	for _, pair := range qaPairs {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+		qEmb, embErr := Embed(ctx, pair.Question)
+		if embErr != nil {
+			qEmb = nil
+		}
+		if saveErr := SaveQAPair(db, filename, functionName, pair.Question, pair.Answer, qEmb); saveErr == nil {
+			fnQACount++
+		}
+	}
+
+	Broadcast("ok", fmt.Sprintf("%d QA pairs saved for %s()", fnQACount, functionName), map[string]any{
+		"fnName":   functionName,
+		"qa_count": fnQACount,
+	})
+	Broadcast("ok", fmt.Sprintf("Retrain complete for %s()", functionName), map[string]any{"fnName": functionName})
+
+	return nil
 }
 
 // chunkContentFixed splits content into fixed-size chunks (fallback for non-PHP files).
@@ -274,7 +441,7 @@ func chunkContentFixed(content string, maxSize int) []string {
 
 // RunPipeline orchestrates a full RAG + evaluation + self-correction loop.
 // If an SSEWriter is provided, events are streamed in real time.
-func RunPipeline(db *sql.DB, filename, query string, sse SSEWriter) (*PipelineResult, error) {
+func RunPipeline(ctx context.Context, db *sql.DB, filename, query string, sse SSEWriter) (*PipelineResult, error) {
 	plog := make([]string, 0, 16)
 
 	emit := func(msg string) {
@@ -290,7 +457,7 @@ func RunPipeline(db *sql.DB, filename, query string, sse SSEWriter) (*PipelineRe
 	// 1. Embed the query.
 	emit("Embedding query with nomic-embed-text...")
 	Broadcast("info", "Embedding query...", nil)
-	queryEmbedding, err := Embed(query)
+	queryEmbedding, err := Embed(ctx, query)
 	if err != nil {
 		return nil, fmt.Errorf("embed query: %w", err)
 	}
@@ -367,12 +534,12 @@ func RunPipeline(db *sql.DB, filename, query string, sse SSEWriter) (*PipelineRe
 		// Stream tokens via SSE if available, else use regular Chat.
 		var response string
 		if sse != nil {
-			response, err = ChatStream(prompt, func(token string) {
+			response, err = ChatStream(ctx, prompt, func(token string) {
 				sse.SendToken(token)
 				sse.Flush()
 			})
 		} else {
-			response, err = Chat(prompt)
+			response, err = Chat(ctx, prompt)
 		}
 		if err != nil {
 			return nil, fmt.Errorf("chat (attempt %d): %w", retries+1, err)
@@ -402,7 +569,7 @@ func RunPipeline(db *sql.DB, filename, query string, sse SSEWriter) (*PipelineRe
 
 		emit(fmt.Sprintf("✗ Failed evaluation (%d errors), storing correction...", len(lastResult.Errors)))
 
-		corrEmb, embErr := Embed(correctionText)
+		corrEmb, embErr := Embed(ctx, correctionText)
 		if embErr != nil {
 			log.Printf("[pipeline] warning: failed to embed correction: %v", embErr)
 			corrEmb = nil

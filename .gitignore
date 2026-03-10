@@ -1,11 +1,30 @@
-# Binaries
-neuralflow
-*.exe
+# ─── OS ──────────────────────────────────
+.DS_Store
+Thumbs.db
 
-# IDE
+# ─── IDE ─────────────────────────────────
 .idea/
 .vscode/
 *.swp
+*.swo
+*~
 
-# OS
-.DS_Store
+# ─── Go Backend ──────────────────────────
+backend/neuralflow
+backend/uploads/
+*.exe
+*.out
+
+# ─── Node / Frontend ────────────────────
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+
+# ─── Logs ────────────────────────────────
+*.log
+npm-debug.log*
+
+# ─── Environment ─────────────────────────
+.env
+.env.local
+.env.*.local

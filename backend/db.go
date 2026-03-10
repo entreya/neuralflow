@@ -79,6 +79,10 @@ func ensureSchema(db *sql.DB) error {
 	// Run migrations for existing databases (MySQL 8.0 compatible).
 	addColumnIfNotExists(db, "chunks", "verbalization", "TEXT")
 	addColumnIfNotExists(db, "chunks", "verbalization_embedding", "JSON")
+	addColumnIfNotExists(db, "chunks", "function_name", "VARCHAR(255)")
+
+	// Add compound index for targeted per-function operations (idempotent).
+	db.Exec(`CREATE INDEX idx_chunks_function ON chunks (filename, function_name)`)
 
 	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS qa_pairs (
 		id            INT AUTO_INCREMENT PRIMARY KEY,
@@ -148,6 +152,19 @@ func InsertChunkReturningID(db *sql.DB, filename string, chunkIndex int, content
 	res, err := db.Exec(
 		`INSERT INTO chunks (filename, chunk_index, content, embedding) VALUES (?, ?, ?, ?)`,
 		filename, chunkIndex, content, embStr,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return res.LastInsertId()
+}
+
+// InsertChunkWithFunction stores a chunk linked to a specific PHP function.
+// Use this instead of InsertChunkReturningID for per-function chunks.
+func InsertChunkWithFunction(db *sql.DB, filename string, chunkIndex int, functionName, content string) (int64, error) {
+	res, err := db.Exec(
+		`INSERT INTO chunks (filename, chunk_index, function_name, content) VALUES (?, ?, ?, ?)`,
+		filename, chunkIndex, functionName, content,
 	)
 	if err != nil {
 		return 0, err

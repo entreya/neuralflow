@@ -9,12 +9,14 @@ CREATE TABLE IF NOT EXISTS chunks (
   id                       INT AUTO_INCREMENT PRIMARY KEY,
   filename                 VARCHAR(255) NOT NULL,
   chunk_index              INT NOT NULL,
+  function_name            VARCHAR(255),
   content                  TEXT NOT NULL,
   embedding                JSON,
   verbalization            TEXT,
   verbalization_embedding  JSON,
   created_at               TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-  INDEX idx_chunks_filename (filename)
+  INDEX idx_chunks_filename (filename),
+  INDEX idx_chunks_function (filename, function_name)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- Stores inferred validation rules per file

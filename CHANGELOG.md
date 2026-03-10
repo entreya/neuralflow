@@ -33,3 +33,42 @@ All notable changes to **NeuralFlow** will be documented in this file.
 - [FEAT] `Broadcast()` function — fan-out log events to all connected SSE clients
 - [FEAT] Color-coded log lines (info/ok/warn/error/data/progress) with mini progress bars
 - [FEAT] Unread badge on Console tab, autoscroll toggle, 500-line pruning, re-connect with retry
+
+## [Unreleased]
+## [Unreleased]
+- [FEAT] Rewrote entire React 18 UI utilizing Vite, Material UI 5, Zustand, and React Query inside local `frontend/` directory.
+- [FEAT] Implemented granular MethodSelection GUI allowing parsing of PHP functions prior to training.
+- [FEAT] Replaced monolithic `/api/upload` route with `/api/parse` (extraction only) and `/api/train` (queue-based training).
+- [FEAT] Integrated Server-Sent Events (SSE) into a terminal-style Log Console Panel tracking async pipeline progress.
+- [FEAT] Implemented strict layout constraints via TopBar, ModelPicker, UploadDropzone, MethodAccordion, and Output panels.
+- [FEAT] Added React Query pooling on `/health`, `/files`, `/rules`, and `/corrections` to fetch immediately on app focus.
+- [REFACTOR] Removed temporary `neuralflow-ui` and static HTML builds. Project is now strictly `backend/` and `frontend/`.
+- [FEAT] Global "Stop Training" button with context.Context cancellation across all Ollama HTTP calls.
+- [FEAT] `POST /api/training/stop` route — cancels all in-flight training immediately.
+- [FEAT] `GET /api/training/status` route — returns `{"active": true/false}` for frontend polling.
+- [FEAT] Pulsing red "Stop Training" button in TopBar with indeterminate LinearProgress bar.
+- [REFACTOR] All Ollama functions (`Chat`, `Embed`, `Verbalize`, `GenerateQA`) now accept `context.Context` for graceful cancellation.
+- [FEAT] Training context manager (`StartTraining`, `StopTraining`, `MarkTrainingDone`, `IsTraining`) in `main.go`.
+- [STYLE] Switched global typography from IBM Plex Mono to Inter sans-serif.
+- [FIX] SSE log stream now wired globally via `useLogs()` in `App.jsx` — logs persist across tab switches.
+- [FIX] `ConsolePanel` reads from Zustand store instead of local `useState` — no more lost logs on unmount.
+- [FEAT] Added `logs`, `logConnected`, `unreadLogs`, `consoleVisible` state to `uploadStore.js`.
+- [FEAT] Reconnect with exponential backoff (1s → 15s, 5 attempts) on SSE disconnect.
+- [FIX] Bug 1: Added `/health` to Vite proxy; removed `baseURL: ''` override in TopBar health query.
+- [FEAT] Bug 2: Added `GET /api/models`, `GET /api/config`, `POST /api/config` routes + handlers + in-memory `ModelConfig` state.
+- [FIX] Bug 3: Replaced hardcoded `"llama3"` with `GetActiveModel()` in `ChatWithSystem` and `ChatStream`. Added `ListOllamaModels()`.
+- [FIX] Bug 4: `handleParse` now uses `filepath.Base()` for disk storage, avoiding subdirectory creation failures.
+- [FIX] Bug 5: `updateFromSSE` now parses function names from message text via regex when `meta.fnName` is absent.
+- [FIX] Bug 6: Added `onSuccess` handler to `useTrainMethods` documenting async training lifecycle.
+- [FIX] Bug 7: File dropzone hidden `<input>` always rendered in DOM so `openFileDialog()` works from card view.
+- [FIX] Bug 8: Added `setFileSelection` batch action; `MethodAccordion` multi-select now registers all rows atomically.
+- [FIX] T1-CRITICAL: `ProcessUpload` + `RetrainMethod` now check `ctx.Done()` at loop top and after every Ollama call; `context.Canceled` exits immediately instead of falling back.
+- [FIX] T2-CRITICAL: `handleTrain` DELETE now uses `WHERE function_name = ?` instead of broken self-referencing MySQL subquery that nuked all chunks.
+- [FIX] T3-CRITICAL: `RetrainMethod` uses `InsertChunkWithFunction` with `chunk_index=0` instead of accumulating `chunk_index=-1` duplicates.
+- [FEAT] T4: Added `function_name` column to `chunks` table with compound index; auto-migration for existing DBs; new `InsertChunkWithFunction` in `db.go`.
+- [FEAT] T5: `PHPFunction` now captures visibility, line count, and static modifier; `ParsedMethod` includes `visibility`, `is_static`, `lines`, `qa_pairs`, `trained_at`.
+- [FIX] T6: Embed failure no longer broadcasts misleading "ok" — warns that verbalization is saved but NOT retrievable.
+- [FIX] T7: All pipeline Broadcasts now include `fnName` and `stage` in meta, removing need for frontend regex parsing.
+- [FIX] `Embed()` now uses `GetActiveEmbedModel()` instead of hardcoded `"nomic-embed-text"` — embed model switching works.
+- [FIX] `ChatWithSystem()` + `ChatStream()` now pass `temperature` from config via `Options` map — temperature slider works.
+- [FEAT] Thinking mode prepends a step-by-step reasoning system directive when enabled.

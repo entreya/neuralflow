@@ -7,7 +7,7 @@
 ```
 ┌─────────────┐     ┌──────────────┐     ┌───────────┐
 │  Frontend    │◄SSE─│  Gin Server  │────►│  Ollama   │
-│  (Vanilla JS)│────►│  (Go :8080)  │     │  llama3   │
+│  (React 18)  │────►│  (Go :8080)  │     │  llama3   │
 └─────────────┘     └──────┬───────┘     │  nomic    │
                            │             └───────────┘
                     ┌──────▼───────┐
@@ -23,19 +23,37 @@
 ## Prerequisites
 
 - **Go 1.22+**
+- **Node.js & npm** (for the React UI)
 - **MySQL** running on `localhost:3306`
 - **Ollama** running on `localhost:11434` with models: `llama3`, `nomic-embed-text`
 
 ## Quick Start
 
+1. **Clone & Database:**
 ```bash
+git clone https://github.com/entreya/neuralflow.git
 cd neuralflow
 go mod tidy
 mysql -u root -proot1234 < schema.sql
-go run .
+cp .env.example .env
 ```
 
-Open **http://localhost:8080** in your browser.
+2. **Start the Go Backend:**
+```bash
+cd backend
+go run .
+# Starts on http://localhost:8080
+```
+
+3. **Start the React Frontend:**
+```bash
+cd frontend
+npm install
+npm run dev
+# Starts on http://localhost:3000
+```
+
+Open **http://localhost:3000** in your browser.
 
 ## Environment Variables
 
@@ -48,19 +66,26 @@ Open **http://localhost:8080** in your browser.
 
 ## API Reference
 
-| Method | Endpoint             | Description                              |
-|--------|----------------------|------------------------------------------|
-| POST   | `/api/upload`        | Upload a file (verbalize + QA generate)  |
-| POST   | `/api/run`           | Run a RAG pipeline query (SSE stream)    |
-| GET    | `/api/files`         | List uploaded files with stats           |
-| GET    | `/api/rules`         | Get inferred rules for a file            |
-| GET    | `/api/corrections`   | Get corrections for a file               |
-| GET    | `/health`            | Check MySQL + Ollama connectivity        |
+| Method | Endpoint                     | Description                              |
+|--------|------------------------------|------------------------------------------|
+| POST   | `/api/parse`                 | Upload a file and extract function names |
+| POST   | `/api/train`                 | Train selected parsed methods            |
+| POST   | `/api/training/stop`         | Cancel all in-flight training instantly  |
+| GET    | `/api/training/status`       | Check if training is active              |
+| GET    | `/api/models`                | List available Ollama models             |
+| GET    | `/api/config`                | Get current model configuration          |
+| POST   | `/api/config`                | Update model, temp, thinking settings    |
+| POST   | `/api/run`                   | Run a RAG pipeline query (SSE stream)    |
+| GET    | `/api/files`                 | List uploaded files with stats           |
+| GET    | `/api/rules`                 | Get inferred rules for a file            |
+| GET    | `/api/corrections`           | Get corrections for a file               |
+| GET    | `/api/logs`                  | Stream backend execution logs via SSE    |
+| GET    | `/health`                    | Check MySQL + Ollama connectivity        |
 
-### POST /api/upload
+### POST /api/parse
 
 ```bash
-curl -F "file=@ExamFee.php" http://localhost:8080/api/upload
+curl -F "files=@ExamFee.php" http://localhost:8080/api/parse
 ```
 
 ### POST /api/run (SSE)
@@ -77,15 +102,17 @@ curl -N -X POST http://localhost:8080/api/run \
 
 ```
 neuralflow/
-├── main.go        ← Gin server + API routes + SSE handler
-├── db.go          ← MySQL connection + queries + vector search + QA pairs
-├── ollama.go      ← Embed, Chat, ChatStream, Verbalize, GenerateQA
-├── pipeline.go    ← ProcessUpload + RAG pipeline + self-correction loop
-├── evaluator.go   ← Two-tier rule engine (universal + inferred)
-├── schema.sql     ← MySQL CREATE TABLE statements (5 tables)
-├── go.mod / go.sum
-└── static/
-    └── index.html ← Complete single-file UI with SSE consumer
+├── backend/
+│   ├── main.go        ← Gin server + API routes + SSE handler
+│   ├── db.go          ← MySQL connection + queries + vector search + QA pairs
+│   ├── ollama.go      ← Embed, Chat, ChatStream, Verbalize, GenerateQA
+│   ├── pipeline.go    ← ProcessUpload + RAG pipeline + self-correction loop
+│   ├── evaluator.go   ← Two-tier rule engine (universal + inferred)
+│   ├── schema.sql     ← MySQL CREATE TABLE statements (5 tables)
+│   └── go.mod / go.sum
+└── frontend/
+    ├── src/           ← React 18, Vite, Material UI 5, Zustand, React Query
+    └── package.json
 ```
 
 ## Dependencies

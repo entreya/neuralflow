@@ -25,15 +25,14 @@ func newOllamaClient() (*api.Client, error) {
 }
 
 // Embed generates an embedding for the given text using nomic-embed-text.
-func Embed(text string) ([]float32, error) {
+func Embed(ctx context.Context, text string) ([]float32, error) {
 	client, err := newOllamaClient()
 	if err != nil {
 		return nil, err
 	}
 
-	ctx := context.Background()
 	req := &api.EmbedRequest{
-		Model: "nomic-embed-text",
+		Model: GetActiveEmbedModel(),
 		Input: text,
 	}
 
@@ -57,18 +56,17 @@ func Embed(text string) ([]float32, error) {
 }
 
 // Chat sends a prompt to llama3 and returns the full response text.
-func Chat(prompt string) (string, error) {
-	return ChatWithSystem("", prompt)
+func Chat(ctx context.Context, prompt string) (string, error) {
+	return ChatWithSystem(ctx, "", prompt)
 }
 
 // ChatWithSystem sends a prompt to llama3 with an optional system message.
-func ChatWithSystem(system, user string) (string, error) {
+func ChatWithSystem(ctx context.Context, system, user string) (string, error) {
 	client, err := newOllamaClient()
 	if err != nil {
 		return "", err
 	}
 
-	ctx := context.Background()
 	messages := make([]api.Message, 0, 2)
 	if system != "" {
 		messages = append(messages, api.Message{Role: "system", Content: system})
@@ -76,16 +74,29 @@ func ChatWithSystem(system, user string) (string, error) {
 	messages = append(messages, api.Message{Role: "user", Content: user})
 
 	req := &api.ChatRequest{
-		Model:    "llama3",
+		Model:    GetActiveModel(),
 		Messages: messages,
 		Stream:   new(bool), // false = non-streaming
+		Options:  map[string]any{"temperature": GetActiveTemperature()},
+	}
+
+	// Thinking/reasoning: prepend a system directive if enabled.
+	if GetActiveThinking() {
+		req.Messages = append([]api.Message{
+			{Role: "system", Content: "Enable extended thinking. Reason step-by-step before answering."},
+		}, req.Messages...)
 	}
 
 	var response strings.Builder
 
 	err = client.Chat(ctx, req, func(cr api.ChatResponse) error {
-		response.WriteString(cr.Message.Content)
-		return nil
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+			response.WriteString(cr.Message.Content)
+			return nil
+		}
 	})
 	if err != nil {
 		return "", fmt.Errorf("ollama chat: %w", err)
@@ -96,31 +107,43 @@ func ChatWithSystem(system, user string) (string, error) {
 
 // ChatStream sends a prompt to llama3 and calls onToken for each streamed chunk.
 // Returns the full assembled response when complete.
-func ChatStream(prompt string, onToken func(token string)) (string, error) {
+func ChatStream(ctx context.Context, prompt string, onToken func(token string)) (string, error) {
 	client, err := newOllamaClient()
 	if err != nil {
 		return "", err
 	}
 
-	ctx := context.Background()
 	stream := true
 	req := &api.ChatRequest{
-		Model: "llama3",
+		Model: GetActiveModel(),
 		Messages: []api.Message{
 			{Role: "user", Content: prompt},
 		},
-		Stream: &stream, // true = streaming
+		Stream:  &stream, // true = streaming
+		Options: map[string]any{"temperature": GetActiveTemperature()},
+	}
+
+	// Thinking/reasoning: prepend a system directive if enabled.
+	if GetActiveThinking() {
+		req.Messages = append([]api.Message{
+			{Role: "system", Content: "Enable extended thinking. Reason step-by-step before answering."},
+		}, req.Messages...)
 	}
 
 	var full strings.Builder
 
 	err = client.Chat(ctx, req, func(cr api.ChatResponse) error {
-		token := cr.Message.Content
-		full.WriteString(token)
-		if onToken != nil {
-			onToken(token)
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+			token := cr.Message.Content
+			full.WriteString(token)
+			if onToken != nil {
+				onToken(token)
+			}
+			return nil
 		}
-		return nil
 	})
 	if err != nil {
 		return "", fmt.Errorf("ollama chat stream: %w", err)
@@ -132,14 +155,14 @@ func ChatStream(prompt string, onToken func(token string)) (string, error) {
 // ─── Code Verbalization ─────────────────────────────────────────────
 
 // Verbalize converts a PHP function body into precise plain-English description.
-func Verbalize(functionBody string) (string, error) {
+func Verbalize(ctx context.Context, functionBody string) (string, error) {
 	system := `You are a code documentation engine. Convert the PHP function below into
 precise plain English. Describe: every condition and what triggers it,
 every fee type handled and when it applies, every input parameter and
 what it controls, every output key produced and its constraints.
 Be exhaustive. No code syntax. No markdown. Plain paragraphs only.`
 
-	result, err := ChatWithSystem(system, functionBody)
+	result, err := ChatWithSystem(ctx, system, functionBody)
 	if err != nil {
 		return "", fmt.Errorf("verbalize: %w", err)
 	}
@@ -156,7 +179,7 @@ type QAPairData struct {
 
 // GenerateQA produces test Q&A pairs from a function verbalization.
 // If the LLM returns invalid JSON, returns an empty slice (no error).
-func GenerateQA(verbalization string) ([]QAPairData, error) {
+func GenerateQA(ctx context.Context, verbalization string) ([]QAPairData, error) {
 	system := `You are a test case generator. Return ONLY a raw JSON array. No markdown.
 No explanation. Each item: {"question": "...", "answer": {...}}
 The answer must follow this schema exactly:
@@ -174,7 +197,7 @@ The answer must follow this schema exactly:
 Function description:
 ` + verbalization
 
-	response, err := ChatWithSystem(system, user)
+	response, err := ChatWithSystem(ctx, system, user)
 	if err != nil {
 		return nil, fmt.Errorf("generate qa: %w", err)
 	}
@@ -238,4 +261,27 @@ func CheckOllama() bool {
 	}
 	defer resp.Body.Close()
 	return resp.StatusCode == http.StatusOK
+}
+
+// ListOllamaModels returns the names of all models available on the Ollama server.
+func ListOllamaModels() ([]string, error) {
+	resp, err := http.Get(ollamaBaseURL + "/api/tags")
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	var result struct {
+		Models []struct {
+			Name string `json:"name"`
+		} `json:"models"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, err
+	}
+	names := make([]string, len(result.Models))
+	for i, m := range result.Models {
+		names[i] = m.Name
+	}
+	return names, nil
 }
