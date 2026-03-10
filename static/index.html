@@ -1008,6 +1008,57 @@
             background: var(--coral-dark);
         }
 
+        /* ── Mid-Panel Tabs ─────────────────────────────── */
+        .mid-tab-bar {
+            display: flex;
+            gap: 0;
+            border-bottom: 1px solid var(--border);
+            padding: 0 16px;
+            background: var(--bg-panel);
+            flex-shrink: 0;
+        }
+
+        .mid-tab-btn {
+            padding: 8px 16px;
+            border: none;
+            background: none;
+            font-family: var(--font);
+            font-size: 11px;
+            font-weight: 500;
+            color: var(--text-muted);
+            cursor: pointer;
+            border-bottom: 2px solid transparent;
+            transition: var(--transition);
+            position: relative;
+        }
+
+        .mid-tab-btn:hover {
+            color: var(--text);
+        }
+
+        .mid-tab-btn.active {
+            color: var(--coral);
+            border-bottom-color: var(--coral);
+        }
+
+        .mid-tab-content {
+            flex: 1;
+            overflow: hidden;
+            display: flex;
+            flex-direction: column;
+        }
+
+        .mid-tab-pane {
+            display: none;
+            flex: 1;
+            overflow-y: auto;
+            flex-direction: column;
+        }
+
+        .mid-tab-pane.active {
+            display: flex;
+        }
+
         /* ── Scrollbar ─────────────────────────────────────── */
         ::-webkit-scrollbar {
             width: 6px;
@@ -1079,30 +1130,21 @@
                         <button id="runBtn" class="run-btn" disabled>Run ▸</button>
                     </div>
                 </div>
-                <div id="resultsArea" class="results-area">
-                    <div class="empty-state">
-                        <div class="empty-state-icon">⚡</div>
-                        <div class="empty-state-text">No results yet</div>
-                        <div class="empty-state-sub">Upload a file and run a query to see results</div>
-                    </div>
+                <div class="mid-tab-bar">
+                    <button class="mid-tab-btn active" data-midtab="result">Result</button>
+                    <button class="mid-tab-btn" data-midtab="console" id="consoleTabBtn">Console</button>
                 </div>
-            </main>
-
-            <!-- ── Right Panel ─────────────────────────────────── -->
-            <aside class="right-panel">
-                <div class="tab-bar">
-                    <button class="tab-btn active" data-tab="rules">Rules</button>
-                    <button class="tab-btn" data-tab="corrections">Corrections</button>
-                    <button class="tab-btn" data-tab="console" id="consoleTabBtn">Console</button>
-                </div>
-                <div class="tab-content">
-                    <div id="rulesTab" class="tab-pane active">
-                        <div class="empty-tab">Select a file to view rules</div>
+                <div class="mid-tab-content">
+                    <div id="resultPane" class="mid-tab-pane active">
+                        <div id="resultsArea" class="results-area">
+                            <div class="empty-state">
+                                <div class="empty-state-icon">⚡</div>
+                                <div class="empty-state-text">No results yet</div>
+                                <div class="empty-state-sub">Upload a file and run a query to see results</div>
+                            </div>
+                        </div>
                     </div>
-                    <div id="correctionsTab" class="tab-pane">
-                        <div class="empty-tab">Select a file to view corrections</div>
-                    </div>
-                    <div id="consoleTab" class="tab-pane">
+                    <div id="consolePane" class="mid-tab-pane">
                         <div class="console-tab-body">
                             <div class="console-header">
                                 <div class="console-dot" id="consoleDot"></div>
@@ -1113,6 +1155,22 @@
                             <div class="console-lines" id="consoleLines"></div>
                             <button class="console-newlogs" id="consoleNewLogsBtn">↓ New logs</button>
                         </div>
+                    </div>
+                </div>
+            </main>
+
+            <!-- ── Right Panel ─────────────────────────────────── -->
+            <aside class="right-panel">
+                <div class="tab-bar">
+                    <button class="tab-btn active" data-tab="rules">Rules</button>
+                    <button class="tab-btn" data-tab="corrections">Corrections</button>
+                </div>
+                <div class="tab-content">
+                    <div id="rulesTab" class="tab-pane active">
+                        <div class="empty-tab">Select a file to view rules</div>
+                    </div>
+                    <div id="correctionsTab" class="tab-pane">
+                        <div class="empty-tab">Select a file to view corrections</div>
                     </div>
                 </div>
             </aside>
@@ -1534,16 +1592,26 @@
             }
         }
 
-        // ─── Tabs ───────────────────────────────────────────────
+        // ─── Right Panel Tabs ─────────────────────────────────────
         $$('.tab-btn').forEach(btn => {
             btn.addEventListener('click', () => {
                 $$('.tab-btn').forEach(b => b.classList.remove('active'));
                 btn.classList.add('active');
                 $$('.tab-pane').forEach(p => p.classList.remove('active'));
                 $(`#${btn.dataset.tab}Tab`).classList.add('active');
+            });
+        });
+
+        // ─── Middle Panel Tabs ───────────────────────────────────
+        $$('.mid-tab-btn').forEach(btn => {
+            btn.addEventListener('click', () => {
+                $$('.mid-tab-btn').forEach(b => b.classList.remove('active'));
+                btn.classList.add('active');
+                $$('.mid-tab-pane').forEach(p => p.classList.remove('active'));
+                $(`#${btn.dataset.midtab}Pane`).classList.add('active');
 
                 // Reset console unread badge when switching to Console tab.
-                if (btn.dataset.tab === 'console') {
+                if (btn.dataset.midtab === 'console') {
                     consoleUnread = 0;
                     updateConsoleBadge();
                 }
