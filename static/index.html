@@ -1,0 +1,1389 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>NeuralFlow — Visual AI Pipeline Builder</title>
+    <meta name="description"
+        content="NeuralFlow: A visual AI pipeline builder for code analysis with self-correcting LLM evaluation">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&display=swap"
+        rel="stylesheet">
+    <style>
+        /* ── Reset & Variables ────────────────────────────── */
+        *,
+        *::before,
+        *::after {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        :root {
+            --bg: #faf7f2;
+            --bg-panel: #ffffff;
+            --bg-input: #f5f1eb;
+            --bg-card: #fef9f4;
+            --coral: #d94f2a;
+            --coral-light: #f4a58e;
+            --coral-dark: #b83d1e;
+            --text: #2c2420;
+            --text-muted: #8a7e76;
+            --text-light: #b5a99e;
+            --border: #e8e2da;
+            --border-focus: #d94f2a;
+            --green: #2d9e5f;
+            --green-bg: #e8f8ee;
+            --red: #d94f2a;
+            --red-bg: #fef0ec;
+            --yellow: #d4a017;
+            --yellow-bg: #fef9e7;
+            --blue: #3273dc;
+            --shadow-sm: 0 1px 3px rgba(44, 36, 32, 0.06);
+            --shadow-md: 0 4px 12px rgba(44, 36, 32, 0.08);
+            --shadow-lg: 0 8px 24px rgba(44, 36, 32, 0.1);
+            --radius: 10px;
+            --radius-sm: 6px;
+            --transition: 0.2s ease;
+            --font: 'IBM Plex Mono', monospace;
+        }
+
+        body {
+            font-family: var(--font);
+            background: var(--bg);
+            color: var(--text);
+            font-size: 13px;
+            line-height: 1.6;
+            min-height: 100vh;
+        }
+
+        /* ── Layout ───────────────────────────────────────── */
+        .app {
+            display: flex;
+            flex-direction: column;
+            height: 100vh;
+        }
+
+        .header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 12px 20px;
+            background: var(--bg-panel);
+            border-bottom: 1px solid var(--border);
+            box-shadow: var(--shadow-sm);
+            z-index: 10;
+        }
+
+        .logo {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .logo-icon {
+            width: 32px;
+            height: 32px;
+            background: linear-gradient(135deg, var(--coral), var(--coral-dark));
+            border-radius: 8px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: #fff;
+            font-weight: 700;
+            font-size: 16px;
+            box-shadow: 0 2px 8px rgba(217, 79, 42, 0.3);
+        }
+
+        .logo-text {
+            font-size: 18px;
+            font-weight: 700;
+            letter-spacing: -0.5px;
+        }
+
+        .logo-text span {
+            color: var(--coral);
+        }
+
+        .health-badge {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 11px;
+            color: var(--text-muted);
+        }
+
+        .health-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: var(--text-light);
+            transition: background var(--transition);
+        }
+
+        .health-dot.ok {
+            background: var(--green);
+            box-shadow: 0 0 6px rgba(45, 158, 95, 0.4);
+        }
+
+        .health-dot.fail {
+            background: var(--red);
+            box-shadow: 0 0 6px rgba(217, 79, 42, 0.4);
+        }
+
+        .main-content {
+            display: flex;
+            flex: 1;
+            overflow: hidden;
+        }
+
+        /* ── Left Panel ───────────────────────────────────── */
+        .left-panel {
+            width: 260px;
+            min-width: 260px;
+            background: var(--bg-panel);
+            border-right: 1px solid var(--border);
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+
+        .panel-section {
+            padding: 16px;
+        }
+
+        .panel-title {
+            font-size: 11px;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            color: var(--text-muted);
+            margin-bottom: 12px;
+        }
+
+        .upload-area {
+            border: 2px dashed var(--border);
+            border-radius: var(--radius);
+            padding: 20px;
+            text-align: center;
+            cursor: pointer;
+            transition: all var(--transition);
+            background: var(--bg-input);
+        }
+
+        .upload-area:hover {
+            border-color: var(--coral);
+            background: var(--red-bg);
+        }
+
+        .upload-area.dragging {
+            border-color: var(--coral);
+            background: var(--red-bg);
+            transform: scale(1.02);
+        }
+
+        .upload-icon {
+            font-size: 28px;
+            margin-bottom: 8px;
+            opacity: 0.6;
+        }
+
+        .upload-text {
+            font-size: 12px;
+            color: var(--text-muted);
+        }
+
+        .upload-text strong {
+            color: var(--coral);
+        }
+
+        #fileInput {
+            display: none;
+        }
+
+        .progress-bar {
+            width: 100%;
+            height: 4px;
+            background: var(--bg-input);
+            border-radius: 2px;
+            margin-top: 12px;
+            overflow: hidden;
+            display: none;
+        }
+
+        .progress-bar.active {
+            display: block;
+        }
+
+        .progress-fill {
+            height: 100%;
+            background: linear-gradient(90deg, var(--coral), var(--coral-light));
+            border-radius: 2px;
+            width: 0%;
+            transition: width 0.4s ease;
+        }
+
+        .file-list {
+            flex: 1;
+            overflow-y: auto;
+            padding: 0 16px 16px;
+        }
+
+        .file-item {
+            display: flex;
+            align-items: center;
+            padding: 10px 12px;
+            border-radius: var(--radius-sm);
+            cursor: pointer;
+            transition: all var(--transition);
+            border: 1px solid transparent;
+            margin-bottom: 4px;
+        }
+
+        .file-item:hover {
+            background: var(--bg-input);
+        }
+
+        .file-item.active {
+            background: var(--red-bg);
+            border-color: var(--coral-light);
+        }
+
+        .file-icon {
+            width: 32px;
+            height: 32px;
+            border-radius: var(--radius-sm);
+            background: var(--bg-input);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 14px;
+            margin-right: 10px;
+            flex-shrink: 0;
+        }
+
+        .file-item.active .file-icon {
+            background: var(--coral);
+            color: #fff;
+        }
+
+        .file-meta {
+            flex: 1;
+            min-width: 0;
+        }
+
+        .file-name {
+            font-size: 12px;
+            font-weight: 600;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        .file-stats {
+            font-size: 10px;
+            color: var(--text-muted);
+            margin-top: 2px;
+        }
+
+        /* ── Middle Panel ─────────────────────────────────── */
+        .middle-panel {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+            background: var(--bg);
+        }
+
+        .query-section {
+            padding: 16px 20px;
+            background: var(--bg-panel);
+            border-bottom: 1px solid var(--border);
+        }
+
+        .query-row {
+            display: flex;
+            gap: 10px;
+            align-items: flex-end;
+        }
+
+        .query-input-wrap {
+            flex: 1;
+        }
+
+        .query-label {
+            font-size: 11px;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            color: var(--text-muted);
+            margin-bottom: 6px;
+        }
+
+        textarea#queryInput {
+            width: 100%;
+            height: 72px;
+            padding: 10px 14px;
+            border: 1px solid var(--border);
+            border-radius: var(--radius-sm);
+            background: var(--bg-input);
+            font-family: var(--font);
+            font-size: 13px;
+            color: var(--text);
+            resize: vertical;
+            transition: border-color var(--transition);
+            outline: none;
+        }
+
+        textarea#queryInput:focus {
+            border-color: var(--coral);
+        }
+
+        .run-btn {
+            padding: 10px 24px;
+            background: linear-gradient(135deg, var(--coral), var(--coral-dark));
+            color: #fff;
+            border: none;
+            border-radius: var(--radius-sm);
+            font-family: var(--font);
+            font-size: 13px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all var(--transition);
+            white-space: nowrap;
+            box-shadow: 0 2px 8px rgba(217, 79, 42, 0.3);
+        }
+
+        .run-btn:hover {
+            transform: translateY(-1px);
+            box-shadow: 0 4px 12px rgba(217, 79, 42, 0.4);
+        }
+
+        .run-btn:active {
+            transform: translateY(0);
+        }
+
+        .run-btn:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+            transform: none;
+        }
+
+        /* ── Results Area ─────────────────────────────────── */
+        .results-area {
+            flex: 1;
+            overflow-y: auto;
+            padding: 20px;
+        }
+
+        .result-header {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            margin-bottom: 16px;
+            flex-wrap: wrap;
+        }
+
+        .score-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            padding: 6px 14px;
+            border-radius: 20px;
+            font-size: 13px;
+            font-weight: 600;
+        }
+
+        .score-badge.pass {
+            background: var(--green-bg);
+            color: var(--green);
+        }
+
+        .score-badge.fail {
+            background: var(--red-bg);
+            color: var(--red);
+        }
+
+        .score-badge.warn {
+            background: var(--yellow-bg);
+            color: var(--yellow);
+        }
+
+        .stat-chip {
+            font-size: 11px;
+            padding: 4px 10px;
+            border-radius: 12px;
+            background: var(--bg-input);
+            color: var(--text-muted);
+            font-weight: 500;
+        }
+
+        .json-output {
+            background: #1e1e2e;
+            color: #cdd6f4;
+            padding: 16px;
+            border-radius: var(--radius);
+            font-size: 12px;
+            line-height: 1.7;
+            overflow-x: auto;
+            white-space: pre-wrap;
+            word-break: break-all;
+            box-shadow: var(--shadow-md);
+            max-height: 400px;
+            overflow-y: auto;
+        }
+
+        .json-output .json-key {
+            color: #89b4fa;
+        }
+
+        .json-output .json-string {
+            color: #a6e3a1;
+        }
+
+        .json-output .json-number {
+            color: #fab387;
+        }
+
+        .json-output .json-bool {
+            color: #cba6f7;
+        }
+
+        .json-output .json-null {
+            color: #f38ba8;
+        }
+
+        .console-section {
+            margin-top: 16px;
+        }
+
+        .console-title {
+            font-size: 11px;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            color: var(--text-muted);
+            margin-bottom: 8px;
+        }
+
+        .console-log {
+            background: #1e1e2e;
+            color: #a6adc8;
+            padding: 12px 16px;
+            border-radius: var(--radius);
+            font-size: 11px;
+            line-height: 1.8;
+            max-height: 200px;
+            overflow-y: auto;
+        }
+
+        .console-line {
+            padding: 2px 0;
+            border-bottom: 1px solid rgba(166, 173, 200, 0.05);
+        }
+
+        .console-line::before {
+            content: '›';
+            color: var(--coral-light);
+            margin-right: 8px;
+        }
+
+        .empty-state {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            height: 100%;
+            color: var(--text-light);
+            text-align: center;
+        }
+
+        .empty-state-icon {
+            font-size: 48px;
+            margin-bottom: 16px;
+            opacity: 0.4;
+        }
+
+        .empty-state-text {
+            font-size: 14px;
+            font-weight: 500;
+            margin-bottom: 6px;
+        }
+
+        .empty-state-sub {
+            font-size: 12px;
+        }
+
+        /* ── Right Panel ──────────────────────────────────── */
+        .right-panel {
+            width: 280px;
+            min-width: 280px;
+            background: var(--bg-panel);
+            border-left: 1px solid var(--border);
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+
+        .tab-bar {
+            display: flex;
+            border-bottom: 1px solid var(--border);
+        }
+
+        .tab-btn {
+            flex: 1;
+            padding: 12px;
+            font-family: var(--font);
+            font-size: 12px;
+            font-weight: 600;
+            background: none;
+            border: none;
+            cursor: pointer;
+            color: var(--text-muted);
+            border-bottom: 2px solid transparent;
+            transition: all var(--transition);
+        }
+
+        .tab-btn:hover {
+            color: var(--text);
+        }
+
+        .tab-btn.active {
+            color: var(--coral);
+            border-bottom-color: var(--coral);
+        }
+
+        .tab-content {
+            flex: 1;
+            overflow-y: auto;
+            padding: 16px;
+        }
+
+        .tab-pane {
+            display: none;
+        }
+
+        .tab-pane.active {
+            display: block;
+        }
+
+        .rule-card {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: var(--radius-sm);
+            padding: 12px;
+            margin-bottom: 10px;
+            transition: all var(--transition);
+        }
+
+        .rule-card:hover {
+            border-color: var(--coral-light);
+            box-shadow: var(--shadow-sm);
+        }
+
+        .rule-header {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            margin-bottom: 6px;
+        }
+
+        .rule-type-badge {
+            font-size: 10px;
+            font-weight: 600;
+            text-transform: uppercase;
+            padding: 2px 8px;
+            border-radius: 4px;
+            letter-spacing: 0.5px;
+        }
+
+        .rule-type-badge.equality {
+            background: #e0ecff;
+            color: #3273dc;
+        }
+
+        .rule-type-badge.range {
+            background: #fff3cd;
+            color: #856404;
+        }
+
+        .rule-type-badge.presence {
+            background: var(--green-bg);
+            color: var(--green);
+        }
+
+        .rule-type-badge.conditional {
+            background: #f0e0ff;
+            color: #7c3aed;
+        }
+
+        .rule-type-badge.enum {
+            background: #ffe0e6;
+            color: #c2185b;
+        }
+
+        .rule-severity {
+            font-size: 10px;
+            font-weight: 600;
+            text-transform: uppercase;
+            margin-left: auto;
+        }
+
+        .rule-severity.error {
+            color: var(--red);
+        }
+
+        .rule-severity.warning {
+            color: var(--yellow);
+        }
+
+        .rule-desc {
+            font-size: 12px;
+            color: var(--text);
+            line-height: 1.5;
+        }
+
+        .rule-field {
+            font-size: 10px;
+            color: var(--text-muted);
+            margin-top: 6px;
+            padding-top: 6px;
+            border-top: 1px solid var(--border);
+        }
+
+        .correction-card {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: var(--radius-sm);
+            padding: 12px;
+            margin-bottom: 10px;
+        }
+
+        .correction-query {
+            font-size: 11px;
+            font-weight: 600;
+            color: var(--text);
+            margin-bottom: 6px;
+        }
+
+        .correction-errors {
+            font-size: 11px;
+            color: var(--red);
+            margin-bottom: 6px;
+            background: var(--red-bg);
+            padding: 6px 10px;
+            border-radius: 4px;
+        }
+
+        .correction-fix {
+            font-size: 11px;
+            color: var(--green);
+            background: var(--green-bg);
+            padding: 6px 10px;
+            border-radius: 4px;
+        }
+
+        .correction-time {
+            font-size: 10px;
+            color: var(--text-light);
+            margin-top: 6px;
+        }
+
+        .empty-tab {
+            text-align: center;
+            color: var(--text-light);
+            padding: 32px 16px;
+            font-size: 12px;
+        }
+
+        /* ── Toast ─────────────────────────────────────────── */
+        .toast {
+            position: fixed;
+            bottom: 20px;
+            right: 20px;
+            padding: 12px 20px;
+            border-radius: var(--radius-sm);
+            font-family: var(--font);
+            font-size: 12px;
+            font-weight: 500;
+            color: #fff;
+            z-index: 1000;
+            transform: translateY(100px);
+            opacity: 0;
+            transition: all 0.3s ease;
+            box-shadow: var(--shadow-lg);
+        }
+
+        .toast.show {
+            transform: translateY(0);
+            opacity: 1;
+        }
+
+        .toast.success {
+            background: var(--green);
+        }
+
+        .toast.error {
+            background: var(--red);
+        }
+
+        .toast.info {
+            background: var(--blue);
+        }
+
+        /* ── Animations ────────────────────────────────────── */
+        @keyframes pulse {
+
+            0%,
+            100% {
+                opacity: 1;
+            }
+
+            50% {
+                opacity: 0.4;
+            }
+        }
+
+        .loading-dot {
+            display: inline-block;
+            animation: pulse 1.4s infinite;
+        }
+
+        @keyframes spin {
+            to {
+                transform: rotate(360deg);
+            }
+        }
+
+        .spinner {
+            display: inline-block;
+            width: 16px;
+            height: 16px;
+            border: 2px solid rgba(255, 255, 255, 0.3);
+            border-top-color: #fff;
+            border-radius: 50%;
+            animation: spin 0.8s linear infinite;
+        }
+
+        /* ── Typewriter Cursor ─────────────────────────────── */
+        @keyframes blink-caret {
+
+            0%,
+            100% {
+                opacity: 1;
+            }
+
+            50% {
+                opacity: 0;
+            }
+        }
+
+        .typewriter-cursor {
+            display: inline-block;
+            width: 2px;
+            height: 1.1em;
+            background: var(--coral-light);
+            margin-left: 1px;
+            vertical-align: text-bottom;
+            animation: blink-caret 0.7s step-end infinite;
+        }
+
+        .console-line.typing-in {
+            animation: fadeSlideIn 0.25s ease-out both;
+        }
+
+        @keyframes fadeSlideIn {
+            from {
+                opacity: 0;
+                transform: translateY(6px);
+            }
+
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+
+        /* ── Scrollbar ─────────────────────────────────────── */
+        ::-webkit-scrollbar {
+            width: 6px;
+        }
+
+        ::-webkit-scrollbar-track {
+            background: transparent;
+        }
+
+        ::-webkit-scrollbar-thumb {
+            background: var(--border);
+            border-radius: 3px;
+        }
+
+        ::-webkit-scrollbar-thumb:hover {
+            background: var(--text-light);
+        }
+    </style>
+</head>
+
+<body>
+    <div class="app">
+        <!-- ── Header ──────────────────────────────────────── -->
+        <header class="header">
+            <div class="logo">
+                <div class="logo-icon">N</div>
+                <div class="logo-text">Neural<span>Flow</span></div>
+            </div>
+            <div class="health-badge">
+                <span>MySQL</span>
+                <div id="healthMysql" class="health-dot"></div>
+                <span>Ollama</span>
+                <div id="healthOllama" class="health-dot"></div>
+            </div>
+        </header>
+
+        <div class="main-content">
+            <!-- ── Left Panel ──────────────────────────────────── -->
+            <aside class="left-panel">
+                <div class="panel-section">
+                    <div class="panel-title">Upload File</div>
+                    <div id="uploadArea" class="upload-area">
+                        <div class="upload-icon">📄</div>
+                        <div class="upload-text">
+                            <strong>Click</strong> or drag a file<br>
+                            .php .json .txt .csv .go .js .py
+                        </div>
+                        <input type="file" id="fileInput" accept=".php,.json,.txt,.csv,.go,.js,.py">
+                    </div>
+                    <div id="progressBar" class="progress-bar">
+                        <div id="progressFill" class="progress-fill"></div>
+                    </div>
+                </div>
+                <div class="panel-section" style="padding-top: 0;">
+                    <div class="panel-title">Files</div>
+                </div>
+                <div id="fileList" class="file-list"></div>
+            </aside>
+
+            <!-- ── Middle Panel ────────────────────────────────── -->
+            <main class="middle-panel">
+                <div class="query-section">
+                    <div class="query-row">
+                        <div class="query-input-wrap">
+                            <div class="query-label">Query <span id="activeFileLabel"
+                                    style="color:var(--coral);"></span></div>
+                            <textarea id="queryInput" placeholder="e.g., student with 3 appearing papers"></textarea>
+                        </div>
+                        <button id="runBtn" class="run-btn" disabled>Run ▸</button>
+                    </div>
+                </div>
+                <div id="resultsArea" class="results-area">
+                    <div class="empty-state">
+                        <div class="empty-state-icon">⚡</div>
+                        <div class="empty-state-text">No results yet</div>
+                        <div class="empty-state-sub">Upload a file and run a query to see results</div>
+                    </div>
+                </div>
+            </main>
+
+            <!-- ── Right Panel ─────────────────────────────────── -->
+            <aside class="right-panel">
+                <div class="tab-bar">
+                    <button class="tab-btn active" data-tab="rules">Rules</button>
+                    <button class="tab-btn" data-tab="corrections">Corrections</button>
+                </div>
+                <div class="tab-content">
+                    <div id="rulesTab" class="tab-pane active">
+                        <div class="empty-tab">Select a file to view rules</div>
+                    </div>
+                    <div id="correctionsTab" class="tab-pane">
+                        <div class="empty-tab">Select a file to view corrections</div>
+                    </div>
+                </div>
+            </aside>
+        </div>
+    </div>
+
+    <!-- ── Toast Container ──────────────────────────────── -->
+    <div id="toast" class="toast"></div>
+
+    <script>
+        // ─── State ──────────────────────────────────────────────
+        const state = {
+            activeFile: null,
+            files: [],
+            isRunning: false,
+            isUploading: false,
+        };
+
+        // Active typewriter animation handle (for cancellation).
+        let _typewriterAbort = null;
+
+        // ─── DOM References ─────────────────────────────────────
+        const $ = (sel) => document.querySelector(sel);
+        const $$ = (sel) => document.querySelectorAll(sel);
+
+        const dom = {
+            uploadArea: $('#uploadArea'),
+            fileInput: $('#fileInput'),
+            progressBar: $('#progressBar'),
+            progressFill: $('#progressFill'),
+            fileList: $('#fileList'),
+            queryInput: $('#queryInput'),
+            activeFileLabel: $('#activeFileLabel'),
+            runBtn: $('#runBtn'),
+            resultsArea: $('#resultsArea'),
+            rulesTab: $('#rulesTab'),
+            correctionsTab: $('#correctionsTab'),
+            toast: $('#toast'),
+            healthMysql: $('#healthMysql'),
+            healthOllama: $('#healthOllama'),
+        };
+
+        // ─── API Helpers ────────────────────────────────────────
+        async function apiGet(url) {
+            const res = await fetch(url);
+            return res.json();
+        }
+
+        async function apiPost(url, body) {
+            const res = await fetch(url, {
+                method: 'POST',
+                headers: body instanceof FormData ? {} : { 'Content-Type': 'application/json' },
+                body: body instanceof FormData ? body : JSON.stringify(body),
+            });
+            return res.json();
+        }
+
+        function showToast(msg, type = 'info') {
+            dom.toast.textContent = msg;
+            dom.toast.className = `toast ${type} show`;
+            setTimeout(() => dom.toast.classList.remove('show'), 3500);
+        }
+
+        // ─── Health Check ───────────────────────────────────────
+        async function checkHealth() {
+            try {
+                const res = await apiGet('/health');
+                const d = res.data || {};
+                dom.healthMysql.className = 'health-dot ' + (d.mysql ? 'ok' : 'fail');
+                dom.healthOllama.className = 'health-dot ' + (d.ollama ? 'ok' : 'fail');
+            } catch {
+                dom.healthMysql.className = 'health-dot fail';
+                dom.healthOllama.className = 'health-dot fail';
+            }
+        }
+
+        // ─── File Upload ────────────────────────────────────────
+        dom.uploadArea.addEventListener('click', () => dom.fileInput.click());
+
+        dom.uploadArea.addEventListener('dragover', (e) => {
+            e.preventDefault();
+            dom.uploadArea.classList.add('dragging');
+        });
+
+        dom.uploadArea.addEventListener('dragleave', () => {
+            dom.uploadArea.classList.remove('dragging');
+        });
+
+        dom.uploadArea.addEventListener('drop', (e) => {
+            e.preventDefault();
+            dom.uploadArea.classList.remove('dragging');
+            if (e.dataTransfer.files.length > 0) uploadFile(e.dataTransfer.files[0]);
+        });
+
+        dom.fileInput.addEventListener('change', () => {
+            if (dom.fileInput.files.length > 0) uploadFile(dom.fileInput.files[0]);
+        });
+
+        async function uploadFile(file) {
+            if (state.isUploading) return;
+            state.isUploading = true;
+
+            dom.progressBar.classList.add('active');
+            dom.progressFill.style.width = '10%';
+
+            const fd = new FormData();
+            fd.append('file', file);
+
+            try {
+                dom.progressFill.style.width = '30%';
+                showToast(`Uploading ${file.name}...`, 'info');
+
+                dom.progressFill.style.width = '50%';
+                const res = await apiPost('/api/upload', fd);
+
+                if (res.error) {
+                    showToast(`Upload failed: ${res.error}`, 'error');
+                    return;
+                }
+
+                dom.progressFill.style.width = '100%';
+                const d = res.data;
+                showToast(`Uploaded ${d.filename}: ${d.chunks} chunks, ${d.rules} rules`, 'success');
+
+                await loadFiles();
+                selectFile(d.filename);
+            } catch (err) {
+                showToast(`Upload error: ${err.message}`, 'error');
+            } finally {
+                state.isUploading = false;
+                setTimeout(() => {
+                    dom.progressBar.classList.remove('active');
+                    dom.progressFill.style.width = '0%';
+                }, 800);
+            }
+        }
+
+        // ─── File List ──────────────────────────────────────────
+        async function loadFiles() {
+            try {
+                const res = await apiGet('/api/files');
+                state.files = res.data || [];
+                renderFileList();
+            } catch (err) {
+                console.error('Failed to load files:', err);
+            }
+        }
+
+        function renderFileList() {
+            if (state.files.length === 0) {
+                dom.fileList.innerHTML = '<div class="empty-tab">No files uploaded yet</div>';
+                return;
+            }
+
+            dom.fileList.innerHTML = state.files.map(f => {
+                const isActive = state.activeFile === f.filename;
+                const ext = f.filename.split('.').pop().toUpperCase();
+                return `
+        <div class="file-item ${isActive ? 'active' : ''}" data-filename="${f.filename}">
+          <div class="file-icon">${ext}</div>
+          <div class="file-meta">
+            <div class="file-name">${f.filename}</div>
+            <div class="file-stats">${f.chunk_count} chunks · ${f.rule_count} rules</div>
+          </div>
+        </div>
+      `;
+            }).join('');
+
+            // Add click handlers.
+            dom.fileList.querySelectorAll('.file-item').forEach(el => {
+                el.addEventListener('click', () => selectFile(el.dataset.filename));
+            });
+        }
+
+        function selectFile(filename) {
+            state.activeFile = filename;
+            dom.activeFileLabel.textContent = filename ? `→ ${filename}` : '';
+            dom.runBtn.disabled = !filename;
+            renderFileList();
+            loadRules(filename);
+            loadCorrections(filename);
+        }
+
+        // ─── Rules ──────────────────────────────────────────────
+        async function loadRules(filename) {
+            if (!filename) {
+                dom.rulesTab.innerHTML = '<div class="empty-tab">Select a file to view rules</div>';
+                return;
+            }
+
+            try {
+                const res = await apiGet(`/api/rules?filename=${encodeURIComponent(filename)}`);
+                const rules = res.data || [];
+
+                if (rules.length === 0) {
+                    dom.rulesTab.innerHTML = '<div class="empty-tab">No rules found for this file</div>';
+                    return;
+                }
+
+                dom.rulesTab.innerHTML = rules.map(r => `
+        <div class="rule-card">
+          <div class="rule-header">
+            <span class="rule-type-badge ${r.type || ''}">${escapeHtml(r.type || 'unknown')}</span>
+            <span class="rule-severity ${r.severity || ''}">${escapeHtml(r.severity || '')}</span>
+          </div>
+          <div class="rule-desc">${escapeHtml(r.description || '')}</div>
+          <div class="rule-field">
+            <strong>${escapeHtml(r.field || '')}</strong>
+            ${r.operator ? ` (${escapeHtml(r.operator)})` : ''}
+          </div>
+        </div>
+      `).join('');
+            } catch {
+                dom.rulesTab.innerHTML = '<div class="empty-tab">Failed to load rules</div>';
+            }
+        }
+
+        // ─── Corrections ────────────────────────────────────────
+        async function loadCorrections(filename) {
+            if (!filename) {
+                dom.correctionsTab.innerHTML = '<div class="empty-tab">Select a file to view corrections</div>';
+                return;
+            }
+
+            try {
+                const res = await apiGet(`/api/corrections?filename=${encodeURIComponent(filename)}`);
+                const corrections = res.data || [];
+
+                if (corrections.length === 0) {
+                    dom.correctionsTab.innerHTML = '<div class="empty-tab">No corrections yet</div>';
+                    return;
+                }
+
+                dom.correctionsTab.innerHTML = corrections.map(c => `
+        <div class="correction-card">
+          <div class="correction-query">Q: ${escapeHtml(c.query || '')}</div>
+          ${c.errors ? `<div class="correction-errors">${escapeHtml(c.errors)}</div>` : ''}
+          ${c.correction ? `<div class="correction-fix">${escapeHtml(c.correction)}</div>` : ''}
+          <div class="correction-time">${c.created_at || ''}</div>
+        </div>
+      `).join('');
+            } catch {
+                dom.correctionsTab.innerHTML = '<div class="empty-tab">Failed to load corrections</div>';
+            }
+        }
+
+        // ─── Run Pipeline ───────────────────────────────────────
+        dom.runBtn.addEventListener('click', runPipeline);
+
+        dom.queryInput.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+                e.preventDefault();
+                runPipeline();
+            }
+        });
+
+        async function runPipeline() {
+            if (state.isRunning || !state.activeFile) return;
+            const query = dom.queryInput.value.trim();
+            if (!query) {
+                showToast('Enter a query first', 'error');
+                return;
+            }
+
+            state.isRunning = true;
+            dom.runBtn.disabled = true;
+            dom.runBtn.innerHTML = '<span class="spinner"></span> Running...';
+
+            dom.resultsArea.innerHTML = `
+      <div class="empty-state">
+        <div class="loading-dot" style="font-size:32px;">⚙️</div>
+        <div class="empty-state-text">Running pipeline...</div>
+        <div class="empty-state-sub">Embedding → RAG → LLM → Evaluate → Self-correct</div>
+      </div>
+    `;
+
+            try {
+                const res = await apiPost('/api/run', {
+                    filename: state.activeFile,
+                    query: query,
+                });
+
+                if (res.error) {
+                    dom.resultsArea.innerHTML = `
+          <div class="empty-state">
+            <div class="empty-state-icon">❌</div>
+            <div class="empty-state-text">Pipeline Failed</div>
+            <div class="empty-state-sub">${escapeHtml(res.error)}</div>
+          </div>
+        `;
+                    showToast('Pipeline failed', 'error');
+                    return;
+                }
+
+                renderResult(res.data);
+                showToast(`Score: ${(res.data.score * 100).toFixed(0)}% — ${res.data.passed ? 'Passed' : 'Failed'}`,
+                    res.data.passed ? 'success' : 'error');
+
+                // Reload corrections after a run.
+                loadCorrections(state.activeFile);
+            } catch (err) {
+                dom.resultsArea.innerHTML = `
+        <div class="empty-state">
+          <div class="empty-state-icon">💥</div>
+          <div class="empty-state-text">Request Failed</div>
+          <div class="empty-state-sub">${escapeHtml(err.message)}</div>
+        </div>
+      `;
+                showToast(`Error: ${err.message}`, 'error');
+            } finally {
+                state.isRunning = false;
+                dom.runBtn.disabled = false;
+                dom.runBtn.innerHTML = 'Run ▸';
+            }
+        }
+
+        function renderResult(data) {
+            // Cancel any in-progress typewriter from a previous run.
+            if (_typewriterAbort) { _typewriterAbort.abort = true; }
+            const ctrl = { abort: false };
+            _typewriterAbort = ctrl;
+
+            const scorePercent = (data.score * 100).toFixed(1);
+            const scoreClass = data.passed ? 'pass' : (data.score >= 0.5 ? 'warn' : 'fail');
+            const statusIcon = data.passed ? '✓' : '✗';
+
+            const rawJson = typeof data.output === 'string'
+                ? data.output
+                : JSON.stringify(data.output, null, 2);
+
+            const errorsHtml = (data.errors || []).length > 0
+                ? `<div style="margin: 12px 0;">
+           <div class="console-title">Evaluation Errors</div>
+           ${data.errors.map(e => `<div style="font-size:11px; color:var(--red); padding:3px 0;">• ${escapeHtml(e)}</div>`).join('')}
+         </div>`
+                : '';
+
+            // Build the shell — JSON output and console log start empty.
+            dom.resultsArea.innerHTML = `
+      <div class="result-header">
+        <div class="score-badge ${scoreClass}">
+          ${statusIcon} Score: ${scorePercent}%
+        </div>
+        <div class="stat-chip">Retries: ${data.retries}</div>
+        <div class="stat-chip">Run #${data.run_id}</div>
+        <div class="stat-chip">${data.passed ? '✓ Passed' : '✗ Failed'}</div>
+      </div>
+      <div id="jsonOutputEl" class="json-output"><span class="typewriter-cursor"></span></div>
+      ${errorsHtml}
+      <div class="console-section">
+        <div class="console-title">Pipeline Log</div>
+        <div id="consoleLogEl" class="console-log"></div>
+      </div>
+    `;
+
+            const jsonEl = document.getElementById('jsonOutputEl');
+            const consoleEl = document.getElementById('consoleLogEl');
+
+            // Start the typewriter for JSON output then stagger the console log.
+            typewriteJSON(jsonEl, rawJson, ctrl, () => {
+                staggerConsoleLog(consoleEl, data.log || [], ctrl);
+            });
+        }
+
+        // ─── Typewriter Engine ──────────────────────────────────
+
+        /**
+         * Types out JSON text character-by-character into `el` with syntax
+         * highlighting applied progressively. Appends a blinking cursor
+         * during typing and removes it on completion.
+         *
+         * @param {HTMLElement} el      Target container element.
+         * @param {string}      rawJson The raw JSON string to type out.
+         * @param {object}      ctrl    Abort controller { abort: bool }.
+         * @param {Function}    onDone  Callback when typing finishes.
+         */
+        function typewriteJSON(el, rawJson, ctrl, onDone) {
+            // We type the *plain text* and periodically re-highlight
+            // the visible portion. Typing speed adapts to content length.
+            const len = rawJson.length;
+
+            // Characters per frame tick — faster for large outputs.
+            const charsPerTick = len > 2000 ? 8 : len > 800 ? 4 : 2;
+            const tickMs = 12; // ~83 fps worth of ticks
+
+            let pos = 0;
+
+            function tick() {
+                if (ctrl.abort) return;
+
+                // Advance position.
+                pos = Math.min(pos + charsPerTick, len);
+                const visible = rawJson.slice(0, pos);
+
+                // Apply syntax highlighting to the visible portion.
+                el.innerHTML = syntaxHighlight(visible)
+                    + (pos < len ? '<span class="typewriter-cursor"></span>' : '');
+
+                // Auto-scroll to bottom.
+                el.scrollTop = el.scrollHeight;
+
+                if (pos < len) {
+                    requestAnimationFrame(() => setTimeout(tick, tickMs));
+                } else {
+                    // Done typing.
+                    if (onDone) onDone();
+                }
+            }
+
+            tick();
+        }
+
+        /**
+         * Reveals console log lines one-by-one with a stagger delay
+         * and a slide-in animation.
+         */
+        function staggerConsoleLog(el, lines, ctrl) {
+            if (!lines.length) return;
+
+            let i = 0;
+            const delayMs = 80; // ms between each line appearing
+
+            function showNext() {
+                if (ctrl.abort || i >= lines.length) return;
+
+                const lineEl = document.createElement('div');
+                lineEl.className = 'console-line typing-in';
+                lineEl.textContent = lines[i];
+                el.appendChild(lineEl);
+                el.scrollTop = el.scrollHeight;
+                i++;
+
+                if (i < lines.length) {
+                    setTimeout(showNext, delayMs);
+                }
+            }
+
+            showNext();
+        }
+
+        // ─── Tabs ───────────────────────────────────────────────
+        $$('.tab-btn').forEach(btn => {
+            btn.addEventListener('click', () => {
+                $$('.tab-btn').forEach(b => b.classList.remove('active'));
+                btn.classList.add('active');
+                $$('.tab-pane').forEach(p => p.classList.remove('active'));
+                $(`#${btn.dataset.tab}Tab`).classList.add('active');
+            });
+        });
+
+        // ─── Utilities ──────────────────────────────────────────
+        function escapeHtml(str) {
+            const el = document.createElement('div');
+            el.textContent = str;
+            return el.innerHTML;
+        }
+
+        function syntaxHighlight(jsonStr) {
+            try {
+                // Ensure it's valid JSON and re-format.
+                const parsed = JSON.parse(jsonStr);
+                jsonStr = JSON.stringify(parsed, null, 2);
+            } catch { /* use as-is */ }
+
+            return escapeHtml(jsonStr).replace(
+                /("(\\u[a-zA-Z0-9]{4}|\\[^u]|[^\\"])*"(\s*:)?|\b(true|false|null)\b|-?\d+(?:\.\d*)?(?:[eE][+\-]?\d+)?)/g,
+                (match) => {
+                    let cls = 'json-number';
+                    if (/^"/.test(match)) {
+                        cls = /:$/.test(match) ? 'json-key' : 'json-string';
+                    } else if (/true|false/.test(match)) {
+                        cls = 'json-bool';
+                    } else if (/null/.test(match)) {
+                        cls = 'json-null';
+                    }
+                    return `<span class="${cls}">${match}</span>`;
+                }
+            );
+        }
+
+        // ─── Init ───────────────────────────────────────────────
+        (async function init() {
+            await checkHealth();
+            await loadFiles();
+            setInterval(checkHealth, 30000);
+        })();
+    </script>
+</body>
+
+</html>
